@@ -1,0 +1,14 @@
+# High-performance Rust formatting configuration
+tab_spaces = 2
+hard_tabs = false
+
+# Code organization
+reorder_imports = true
+reorder_modules = true
+
+# Performance-oriented settings
+force_explicit_abi = false
+
+# Readability
+use_field_init_shorthand = true
+use_try_shorthand = true

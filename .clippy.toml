@@ -1,0 +1,4 @@
+# High-performance Rust clippy configuration
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 600
+too-many-arguments-threshold = 10
