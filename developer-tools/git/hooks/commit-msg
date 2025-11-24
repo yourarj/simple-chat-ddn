@@ -1,0 +1,47 @@
+#!/bin/sh
+
+# Conventional Commit message validation hook
+# This hook will validate that commit messages follow the conventional commit format
+
+commit_msg=$(cat "$1")
+
+# Check if message is empty
+if [ -z "$commit_msg" ]; then
+    echo "❌ Commit message cannot be empty"
+    exit 1
+fi
+
+# Extract the first line (header)
+commit_header=$(echo "$commit_msg" | head -n1)
+
+# Check conventional commit format: type(scope): description
+if ! echo "$commit_header" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)\([a-z0-9\-]+\): [a-z].*'; then
+    echo "❌ Commit message must follow conventional commit format:"
+    echo "   <type>(<scope>): <subject>"
+    echo ""
+    echo "   Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+    echo "   Example: feat(auth): add login functionality"
+    echo ""
+    echo "   Current message: $commit_header"
+    exit 1
+fi
+
+# Check subject length (should be <= 50 characters)
+subject_length=$(echo "$commit_header" | wc -c)
+if [ "$subject_length" -gt 51 ]; then
+    echo "❌ Subject line must be 50 characters or less"
+    echo "   Current length: $((subject_length - 1)) characters"
+    echo "   Current message: $commit_header"
+    exit 1
+fi
+
+# Check for proper capitalization (should start with lowercase)
+first_char=$(echo "$commit_header" | cut -c1)
+if [[ "$first_char" =~ [A-Z] ]]; then
+    echo "❌ Subject line should start with lowercase letter"
+    echo "   Current message: $commit_header"
+    exit 1
+fi
+
+echo "✅ Commit message format is valid"
+exit 0

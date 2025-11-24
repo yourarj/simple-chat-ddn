@@ -1,0 +1,41 @@
+# <type>(<scope>): <subject>
+#
+# <body>
+#
+# <footer>
+#
+# Type must be one of the following:
+# * feat: A new feature
+# * fix: A bug fix
+# * docs: Documentation only changes
+# * style: Changes that do not affect the meaning of the code
+# * refactor: A code change that neither fixes a bug nor adds a feature
+# * perf: A code change that improves performance
+# * test: Adding missing tests or correcting existing tests
+# * build: Changes that affect the build system or external dependencies
+# * ci: Changes to our CI configuration files and scripts
+# * chore: Other changes that don't modify src or test files
+# * revert: Reverts a previous commit
+#
+# Scope should be noun describing a section of the codebase surrounded by parentheses, e.g., fix(parser):
+#
+# Subject should use impartial mood and tell what you did in max 50 chars
+#
+# Body should go into detail about what you did and why, and must be 72 chars or less per line
+#
+# Footer should contain any "BREAKING CHANGE:" notes or "Closes #issue_number" references
+#
+# Examples:
+# feat(auth): add login functionality
+#
+# Add email/password authentication with JWT token generation.
+# Includes user validation and error handling for failed login attempts.
+#
+# Closes #123
+#
+# fix(api): resolve memory leak in message processing
+#
+# Updated message queue handling to properly release resources after
+# processing. Added proper cleanup in error scenarios.
+#
+# BREAKING CHANGE: Message processing API has changed signature
