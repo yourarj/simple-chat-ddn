@@ -1,6 +1,6 @@
 use chat_core::{
   error::ApplicationError,
-  protocol::{ChatMessage, encode_message},
+  protocol::{ServerMessage, encode_message},
 };
 use tokio::{
   io::AsyncWriteExt,
@@ -11,12 +11,12 @@ use tokio::{
 use tracing::warn;
 
 pub fn spawn_broadcast_dispatcher(
-  mut rec: Receiver<ChatMessage>,
+  mut rec: Receiver<ServerMessage>,
   channel_owner: String,
   mut writer: OwnedWriteHalf,
 ) -> JoinHandle<Result<(), ApplicationError>> {
   tokio::spawn(async move {
-    let success_msg = ChatMessage::Success {
+    let success_msg = ServerMessage::Success {
       message: format!("Welcome to the chat 🙏 `{}`", channel_owner),
     };
     let frame = encode_message(&success_msg)?;
@@ -25,19 +25,35 @@ pub fn spawn_broadcast_dispatcher(
     loop {
       match rec.recv().await {
         Ok(message) => {
-          if Some(channel_owner.as_str()) == message.username() {
+          // Skip messages from the channel owner (self-filtering)
+          if let Some(message_username) = message.username()
+            && message_username == channel_owner
+          {
             continue;
           }
 
+          // Handle different message types
           match message {
-            ChatMessage::Join { username: _ } => todo!(),
-            ChatMessage::Leave { username: _ } => todo!(),
-            ChatMessage::Message { username, content } => {
-              let cont = encode_message(&ChatMessage::Message { username, content })?;
-              writer.write_all(&cont).await?;
+            ServerMessage::Message { username, content } => {
+              let frame = encode_message(&ServerMessage::Message { username, content })?;
+              writer.write_all(&frame).await?;
             }
-            ChatMessage::Error { reason: _ } => todo!(),
-            ChatMessage::Success { message: _ } => todo!(),
+            ServerMessage::Error { reason } => {
+              let frame = encode_message(&ServerMessage::Error { reason })?;
+              writer.write_all(&frame).await?;
+            }
+            ServerMessage::Success { message } => {
+              let frame = encode_message(&ServerMessage::Success { message })?;
+              writer.write_all(&frame).await?;
+            }
+            ServerMessage::UserJoined { username } => {
+              let frame = encode_message(&ServerMessage::UserJoined { username })?;
+              writer.write_all(&frame).await?;
+            }
+            ServerMessage::UserLeft { username } => {
+              let frame = encode_message(&ServerMessage::UserLeft { username })?;
+              writer.write_all(&frame).await?;
+            }
           }
         }
         Err(RecvError::Lagged(lagged_by)) => {
@@ -50,8 +66,8 @@ pub fn spawn_broadcast_dispatcher(
       }
     }
 
-    let success_msg = ChatMessage::Success {
-      message: "Disconnected: Good bye `{user}`!".to_string(),
+    let success_msg = ServerMessage::Success {
+      message: format!("Disconnected: Good bye `{}`!", channel_owner),
     };
     let frame = encode_message(&success_msg)?;
     writer.write_all(&frame).await?;

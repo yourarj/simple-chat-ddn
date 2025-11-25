@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
-use chat_core::protocol::{ChatMessage, LENGTH_PREFIX, decode_message, encode_message};
+use chat_core::protocol::{
+  ClientMessage, LENGTH_PREFIX, ServerMessage, decode_message, encode_message,
+};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -143,23 +145,27 @@ impl ChatClient {
       return Err(anyhow!("Incomplete message"));
     }
 
-    let message = decode_message(&data[LENGTH_PREFIX..LENGTH_PREFIX + length])?;
+    // Decode as ServerMessage
+    let message = decode_message(&data[LENGTH_PREFIX..LENGTH_PREFIX + length])
+      .map_err(|e| anyhow!("Failed to decode server message: {}", e))?;
 
     match message {
-      ChatMessage::Message { username, content } => {
-        println!("{}: {}", username, content);
+      ServerMessage::Message { username, content } => {
+        println!("🗨️: {}: {}", username, content);
       }
-      ChatMessage::Error { reason } => {
-        println!("Error: {}", reason);
+      ServerMessage::Error { reason } => {
+        println!("❌: {}", reason);
       }
-      ChatMessage::Success { message } => {
-        println!("Success: {}", message);
+      ServerMessage::Success { message } => {
+        println!("❕: {}", message);
       }
-      _ => {
-        println!("Unknown message type received");
+      ServerMessage::UserJoined { username } => {
+        println!("⚠️: `{}` joined the chat", username);
+      }
+      ServerMessage::UserLeft { username } => {
+        println!("⚠️: `{}` left the chat", username);
       }
     }
-
     Ok(())
   }
 
@@ -170,19 +176,19 @@ impl ChatClient {
     match parts[0] {
       "send" if parts.len() > 1 => {
         info!("User {} sending message: {}", self.username, parts[1]);
-        let message = ChatMessage::Message {
+        let message = ClientMessage::Message {
           username: self.username.clone(),
           content: parts[1].to_string(),
         };
-        self.send_message(message).await?;
+        self.send_client_message(message).await?;
       }
       "leave" => {
         info!("User {} requested leave via command", self.username);
         println!("Leaving chat...");
-        let message = ChatMessage::Leave {
+        let message = ClientMessage::Leave {
           username: self.username.clone(),
         };
-        self.send_message(message).await?;
+        self.send_client_message(message).await?;
         return Err(anyhow!("Client requested leave")); // Break loop
       }
       _ => {
@@ -195,26 +201,27 @@ impl ChatClient {
 
   /// Send join message to server
   async fn join(&mut self) -> Result<()> {
-    let message = ChatMessage::Join {
+    let message = ClientMessage::Join {
       username: self.username.clone(),
     };
+    self.send_client_message(message).await?;
+    Ok(())
+  }
+
+  /// Send client message to server
+  async fn send_client_message(&mut self, message: ClientMessage) -> Result<()> {
     let frame = encode_message(&message)?;
-
     self.writer.write_all(&frame).await?;
-
     Ok(())
   }
 
   /// Graceful shutdown with proper error handling and cleanup
   async fn graceful_leave(&mut self) -> Result<()> {
     info!("Sending leave message for user: {}", self.username);
-    let message = ChatMessage::Leave {
+    let message = ClientMessage::Leave {
       username: self.username.clone(),
     };
-    let frame = encode_message(&message)?;
-
-    // Write the leave message
-    self.writer.write_all(&frame).await?;
+    self.send_client_message(message).await?;
 
     // Flush to ensure it's sent
     self.writer.flush().await?;
@@ -230,13 +237,6 @@ impl ChatClient {
       Err(e) => warn!("Writer shutdown failed for user: {}: {}", self.username, e),
     }
 
-    Ok(())
-  }
-
-  /// Send generic message to server
-  async fn send_message(&mut self, message: ChatMessage) -> Result<()> {
-    let frame = encode_message(&message)?;
-    self.writer.write_all(&frame).await?;
     Ok(())
   }
 }

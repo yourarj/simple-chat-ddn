@@ -1,8 +1,8 @@
 // server/src/lib.rs
 use anyhow::Result;
 use chat_core::error::ApplicationError;
-use chat_core::protocol::{ChatMessage, encode_message};
-use chat_core::transport_layer::read_next_message_from_stream;
+use chat_core::protocol::{ClientMessage, ServerMessage, encode_message};
+use chat_core::transport_layer::read_message_from_stream;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -20,7 +20,7 @@ type UserMap = Arc<DashMap<String, JoinHandle<Result<(), ApplicationError>>>>;
 pub struct ChatServer {
   users: UserMap,
   max_connections: usize,
-  broadcaster: Arc<Sender<ChatMessage>>,
+  broadcaster: Arc<Sender<ServerMessage>>,
 }
 
 /// Shutdown signal for graceful server shutdown
@@ -110,7 +110,7 @@ impl ChatServer {
   /// Handle individual client connection
   async fn handle_client(
     stream: TcpStream,
-    broadcaster: Arc<Sender<ChatMessage>>,
+    broadcaster: Arc<Sender<ServerMessage>>,
     users: UserMap,
   ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
@@ -119,10 +119,10 @@ impl ChatServer {
     let mut username;
 
     loop {
-      match read_next_message_from_stream(&mut reader, &mut buffer).await {
-        Ok(ChatMessage::Join { username: un }) => {
+      match read_message_from_stream(&mut reader, &mut buffer).await {
+        Ok(ClientMessage::Join { username: un }) => {
           if users.contains_key(&un) {
-            let error_msg = ChatMessage::Error {
+            let error_msg = ServerMessage::Error {
               reason: format!("Username `{}` has already been taken", &un),
             };
             let frame = encode_message(&error_msg)?;
@@ -133,7 +133,7 @@ impl ChatServer {
           break;
         }
         Ok(_) => {
-          let error_msg = ChatMessage::Error {
+          let error_msg = ServerMessage::Error {
             reason: "You have to join the group before doing any other operation".to_string(),
           };
           let frame = encode_message(&error_msg)?;
@@ -151,30 +151,48 @@ impl ChatServer {
     let join_handle = crate::broadcast::spawn_broadcast_dispatcher(rec, user.clone(), writer);
     users.insert(user.clone(), join_handle);
     username = Some(user.clone());
-    Self::broadcast_message(&broadcaster, &users, &user, "joined the chat!", &user).await?;
+    // Broadcast join notification
+    let join_notification = ServerMessage::UserJoined {
+      username: user.clone(),
+    };
+    Self::broadcast_message(&broadcaster, &users, join_notification, &user).await?;
 
     info!("User {} joined the chat", user);
 
     loop {
-      let message = read_next_message_from_stream(&mut reader, &mut buffer).await;
+      let message = read_message_from_stream(&mut reader, &mut buffer).await;
       match message {
-        Ok(ChatMessage::Join { username: _ }) => {}
-        Ok(ChatMessage::Leave { username: user }) => {
+        Ok(ClientMessage::Join { username: _ }) => {
+          // Ignore additional join messages
+        }
+        Ok(ClientMessage::Leave { username: user }) => {
           if let Some((_, join_handle)) = users.remove(&user) {
             join_handle.abort();
           }
           info!("User {} left the chat", user);
-          Self::broadcast_message(&broadcaster, &users, &user, "left the chatroom", &user).await?;
+
+          // Broadcast leave notification using new message type
+          let leave_notification = ServerMessage::UserLeft {
+            username: user.clone(),
+          };
+          Self::broadcast_message(&broadcaster, &users, leave_notification, &user).await?;
           break;
         }
-        Ok(ChatMessage::Message {
+        Ok(ClientMessage::Message {
           username: user,
           content,
         }) => {
-          Self::broadcast_message(&broadcaster, &users, &user, &content, &user).await?;
+          // Broadcast the message to other users using new message type
+          let message_notification = ServerMessage::Message {
+            username: user.clone(),
+            content: content.clone(),
+          };
+          Self::broadcast_message(&broadcaster, &users, message_notification, &user).await?;
           info!("Message from {}: {}", user, content);
         }
-        _ => (),
+        _ => {
+          // Handle errors gracefully
+        }
       }
     }
 
@@ -192,17 +210,11 @@ impl ChatServer {
 
   /// Broadcast message to all users except sender
   async fn broadcast_message(
-    broadcaster: &Arc<Sender<ChatMessage>>,
+    broadcaster: &Arc<Sender<ServerMessage>>,
     users: &UserMap,
-    sender: &str,
-    content: &str,
+    message: ServerMessage,
     exclude_user: &str,
   ) -> Result<()> {
-    let message = ChatMessage::Message {
-      username: sender.to_string(),
-      content: content.to_string(),
-    };
-
     let mut failed_users = Vec::new();
 
     // Use dashmap's sharded locking for efficient concurrent iteration
