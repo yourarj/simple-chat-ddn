@@ -17,7 +17,7 @@ pub fn spawn_broadcast_dispatcher(
 ) -> JoinHandle<Result<(), ApplicationError>> {
   tokio::spawn(async move {
     let success_msg = ChatMessage::Success {
-      message: "Welcome to the chat {user}".to_string(),
+      message: format!("Welcome to the chat 🙏 `{}`", channel_owner),
     };
     let frame = encode_message(&success_msg)?;
 

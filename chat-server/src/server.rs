@@ -80,7 +80,7 @@ impl ChatServer {
         Ok(ChatMessage::Join { username: un }) => {
           if users.contains_key(&un) {
             let error_msg = ChatMessage::Error {
-              reason: "Username `{user}` already taken".to_string(),
+              reason: format!("Username `{}` has already been taken", &un),
             };
             let frame = encode_message(&error_msg)?;
             writer.write_all(&frame).await?;
@@ -108,14 +108,7 @@ impl ChatServer {
     let join_handle = crate::broadcast::spawn_broadcast_dispatcher(rec, user.clone(), writer);
     users.insert(user.clone(), join_handle);
     username = Some(user.clone());
-    Self::broadcast_message(
-      &broadcaster,
-      &users,
-      &user,
-      "{user} has joined the chat!",
-      &user,
-    )
-    .await?;
+    Self::broadcast_message(&broadcaster, &users, &user, "joined the chat!", &user).await?;
 
     info!("User {} joined the chat", user);
 

@@ -2,6 +2,7 @@
 use anyhow::Result;
 use chat_client::client::ChatClient;
 use clap::Parser;
+use tracing::Level;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -18,7 +19,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  tracing_subscriber::fmt::init();
+  tracing_subscriber::fmt::fmt()
+    .with_max_level(Level::ERROR)
+    .init();
 
   let args = Args::parse();
 

@@ -4,7 +4,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
-use tracing::{error, info};
+use tokio::signal;
+use tracing::{error, info, warn};
 
 /// Async CLI chat client with non-blocking I/O
 pub struct ChatClient {
@@ -38,15 +39,29 @@ impl ChatClient {
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buffer = vec![0u8; 4096];
     let mut stdin_buffer = String::new();
+    let mut shutdown_signal = Box::pin(signal::ctrl_c());
+    let mut should_shutdown = false;
 
     println!("Welcome to the chat! Commands: 'send <message>', 'leave'");
+    info!("Client event loop started for user: {}", self.username);
 
     loop {
       select! {
+          // Handle shutdown signal
+          _ = shutdown_signal.as_mut() => {
+              info!("Received shutdown signal (Ctrl+C)");
+              should_shutdown = true;
+              break;
+          }
+
           // Read from server
           result = self.reader.read(&mut buffer) => {
+              if should_shutdown {
+                  break;
+              }
               match result {
                   Ok(0) => {
+                      info!("Server disconnected unexpectedly");
                       println!("Server disconnected");
                       break;
                   }
@@ -64,15 +79,25 @@ impl ChatClient {
 
           // Read from stdin
           result = stdin.read_line(&mut stdin_buffer) => {
+              if should_shutdown {
+                  break;
+              }
               match result {
                   Ok(0) => {
+                      info!("Stdin closed unexpectedly");
                       println!("Stdin closed");
                       break;
                   }
                   Ok(_) => {
                       let input = stdin_buffer.trim();
                       if let Err(e) = self.handle_user_input(input).await {
-                          error!("Error handling user input: {}", e);
+                          if e.to_string().contains("Client requested leave") {
+                              info!("User requested graceful shutdown via 'leave' command");
+                              should_shutdown = true;
+                              break;
+                          } else {
+                              error!("Error handling user input: {}", e);
+                          }
                       }
                       stdin_buffer.clear();
                   }
@@ -85,7 +110,25 @@ impl ChatClient {
       }
     }
 
-    self.leave().await?;
+    // Graceful shutdown
+    if should_shutdown {
+      info!("Initiating graceful shutdown for user: {}", self.username);
+      if let Err(e) = self.graceful_leave().await {
+        error!("Failed to send leave message during shutdown: {}", e);
+      } else {
+        info!(
+          "Successfully sent leave message for user: {}",
+          self.username
+        );
+      }
+    } else {
+      // Non-graceful exit (server disconnect, stdin close, etc.)
+      warn!(
+        "Client exiting without graceful shutdown for user: {}",
+        self.username
+      );
+    }
+
     Ok(())
   }
 
@@ -126,6 +169,7 @@ impl ChatClient {
 
     match parts[0] {
       "send" if parts.len() > 1 => {
+        info!("User {} sending message: {}", self.username, parts[1]);
         let message = ChatMessage::Message {
           username: self.username.clone(),
           content: parts[1].to_string(),
@@ -133,6 +177,7 @@ impl ChatClient {
         self.send_message(message).await?;
       }
       "leave" => {
+        info!("User {} requested leave via command", self.username);
         println!("Leaving chat...");
         let message = ChatMessage::Leave {
           username: self.username.clone(),
@@ -160,14 +205,30 @@ impl ChatClient {
     Ok(())
   }
 
-  /// Send leave message to server
-  async fn leave(&mut self) -> Result<()> {
+  /// Graceful shutdown with proper error handling and cleanup
+  async fn graceful_leave(&mut self) -> Result<()> {
+    info!("Sending leave message for user: {}", self.username);
     let message = ChatMessage::Leave {
       username: self.username.clone(),
     };
     let frame = encode_message(&message)?;
 
+    // Write the leave message
     self.writer.write_all(&frame).await?;
+
+    // Flush to ensure it's sent
+    self.writer.flush().await?;
+
+    info!(
+      "Leave message sent successfully for user: {}",
+      self.username
+    );
+
+    // Gracefully shutdown the writer
+    match self.writer.shutdown().await {
+      Ok(()) => info!("Writer shutdown successful for user: {}", self.username),
+      Err(e) => warn!("Writer shutdown failed for user: {}: {}", self.username, e),
+    }
 
     Ok(())
   }
