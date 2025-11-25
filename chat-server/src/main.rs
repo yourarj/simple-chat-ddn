@@ -2,6 +2,8 @@
 use anyhow::Result;
 use chat_server::server::ChatServer;
 use clap::Parser;
+use tokio::signal;
+use tokio::sync::oneshot;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -23,7 +25,57 @@ async fn main() -> Result<()> {
   let args = Args::parse();
 
   let server = ChatServer::new(args.max_connections);
-  server.run(&args.host, args.port).await?;
+  let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+  // Start signal handler
+  let shutdown_signal = shutdown_signal(shutdown_tx);
+
+  // Start server
+  let server_task =
+    tokio::spawn(async move { server.run(&args.host, args.port, shutdown_rx).await });
+
+  // Wait for either server completion or shutdown signal
+  tokio::select! {
+    _ = shutdown_signal => {
+      tracing::info!("Shutdown signal received, server will shutdown gracefully");
+    }
+    result = server_task => {
+      match result {
+        Ok(_) => tracing::info!("Server completed normally"),
+        Err(e) => tracing::error!("Server error: {}", e),
+      }
+    }
+  }
 
   Ok(())
+}
+
+/// Gracefully shutdown signal handler
+async fn shutdown_signal(shutdown_tx: oneshot::Sender<()>) {
+  let ctrl_c = async {
+    signal::ctrl_c()
+      .await
+      .expect("failed to install Ctrl+C handler");
+  };
+
+  #[cfg(unix)]
+  let terminate = async {
+    signal::unix::signal(signal::unix::SignalKind::terminate())
+      .expect("failed to install signal handler")
+      .recv()
+      .await;
+  };
+
+  #[cfg(not(unix))]
+  let terminate = std::future::pending::<()>();
+
+  tokio::select! {
+    _ = ctrl_c => {},
+    _ = terminate => {},
+  }
+
+  tracing::info!("Shutdown signal received, starting graceful shutdown...");
+
+  // Send shutdown signal to server
+  let _ = shutdown_tx.send(());
 }

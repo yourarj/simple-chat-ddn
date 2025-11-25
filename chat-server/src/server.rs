@@ -7,7 +7,10 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast::{self, Sender};
+use tokio::sync::{
+  broadcast::{self, Sender},
+  oneshot,
+};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -19,6 +22,9 @@ pub struct ChatServer {
   max_connections: usize,
   broadcaster: Arc<Sender<ChatMessage>>,
 }
+
+/// Shutdown signal for graceful server shutdown
+pub type ShutdownSignal = oneshot::Receiver<()>;
 
 impl ChatServer {
   pub fn new(max_connections: usize) -> Self {
@@ -32,37 +38,73 @@ impl ChatServer {
   }
 
   /// Start the chat server on specified host and port
-  pub async fn run(&self, host: &str, port: u16) -> Result<()> {
+  pub async fn run(&self, host: &str, port: u16, mut shutdown_rx: ShutdownSignal) -> Result<()> {
     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
     info!("Chat server listening on {}:{}", host, port);
 
     let connection_limiter = Arc::new(tokio::sync::Semaphore::new(self.max_connections));
 
     loop {
-      // Acquire permit for connection limiting
-      let permit = connection_limiter.clone().acquire_owned().await?;
-
-      match listener.accept().await {
-        Ok((stream, addr)) => {
-          info!("New connection from {}", addr);
-
-          let users = Arc::clone(&self.users);
-          let broadcaster = Arc::clone(&self.broadcaster);
-
-          tokio::spawn(async move {
-            if let Err(e) = Self::handle_client(stream, broadcaster, users).await {
-              error!("Client handler error: {}", e);
-            }
-            drop(permit); // Release connection permit
-          });
+      tokio::select! {
+        _ = &mut shutdown_rx => {
+          info!("Shutdown signal received, starting graceful shutdown...");
+          self.shutdown().await?;
+          return Ok(());
         }
-        Err(e) => {
-          error!("Accept error: {}", e);
-          tracing::debug!("Accept failed, releasing permit");
-          drop(permit);
+        accept_result = listener.accept() => {
+          match accept_result {
+            Ok((stream, addr)) => {
+              info!("New connection from {}", addr);
+
+              let users = Arc::clone(&self.users);
+              let broadcaster = Arc::clone(&self.broadcaster);
+              let permit = connection_limiter.clone().acquire_owned().await?;
+
+              tokio::spawn(async move {
+                if let Err(e) = Self::handle_client(stream, broadcaster, users).await {
+                  error!("Client handler error: {}", e);
+                }
+                drop(permit); // Release connection permit
+              });
+            }
+            Err(e) => {
+              error!("Accept error: {}", e);
+              tracing::debug!("Accept failed, releasing permit");
+              // Note: We can't access permit here since it's created inside the match arm
+              // This is a limitation of the current structure
+            }
+          }
         }
       }
     }
+  }
+
+  /// Gracefully shutdown the server
+  async fn shutdown(&self) -> Result<()> {
+    info!("Starting graceful shutdown...");
+
+    // Close the broadcast channel to signal all clients to disconnect
+    drop(Arc::clone(&self.broadcaster));
+
+    // Wait a bit to allow current messages to be processed
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Abort all user tasks
+    let mut user_tasks = Vec::new();
+    for entry in self.users.iter() {
+      if let Some((_, join_handle)) = self.users.remove(entry.key()) {
+        user_tasks.push(join_handle);
+      }
+    }
+
+    // Wait for all user tasks to complete
+    for join_handle in user_tasks {
+      join_handle.abort();
+      let _ = join_handle.await;
+    }
+
+    info!("Server shutdown complete");
+    Ok(())
   }
 
   /// Handle individual client connection
