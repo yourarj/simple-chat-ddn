@@ -126,6 +126,7 @@ impl ChatServer {
         Ok(ChatMessage::Leave { username: user }) => {
           users.remove(&user);
           info!("User {} left the chat", user);
+          Self::broadcast_message(&broadcaster, &users, &user, "left the chatroom", &user).await?;
           break;
         }
         Ok(ChatMessage::Message {
