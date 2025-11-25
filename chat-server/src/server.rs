@@ -58,6 +58,7 @@ impl ChatServer {
         }
         Err(e) => {
           error!("Accept error: {}", e);
+          tracing::debug!("Accept failed, releasing permit");
           drop(permit);
         }
       }
@@ -117,7 +118,9 @@ impl ChatServer {
       match message {
         Ok(ChatMessage::Join { username: _ }) => {}
         Ok(ChatMessage::Leave { username: user }) => {
-          users.remove(&user);
+          if let Some((_, join_handle)) = users.remove(&user) {
+            join_handle.abort();
+          }
           info!("User {} left the chat", user);
           Self::broadcast_message(&broadcaster, &users, &user, "left the chatroom", &user).await?;
           break;
@@ -129,19 +132,16 @@ impl ChatServer {
           Self::broadcast_message(&broadcaster, &users, &user, &content, &user).await?;
           info!("Message from {}: {}", user, content);
         }
-        _ => {
-          //   let error_msg = ChatMessage::Error {
-          //     reason: "Invalid message type".to_string(),
-          //   };
-          //   let frame = encode_message(&error_msg)?;
-          //   writer.write_all(&frame).await?;
-        }
+        _ => (),
       }
     }
 
     // Cleanup on disconnect
     if let Some(user) = username {
-      users.remove(&user);
+      tracing::debug!("Cleaning up disconnected user: {}", user);
+      if let Some((_, join_handle)) = users.remove(&user) {
+        join_handle.abort();
+      }
       info!("User {} disconnected", user);
     }
 
