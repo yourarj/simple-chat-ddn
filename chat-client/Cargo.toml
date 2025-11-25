@@ -1,0 +1,13 @@
+[package]
+name = "chat-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chat-core = { path = "../chat-core" }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

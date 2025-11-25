@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["chat-core"]
+members = ["chat-client", "chat-core", "chat-server"]
 default-members = ["chat-core"]
 exclude = ["developer-tools"]
 
@@ -10,19 +10,18 @@ edition = "2024"
 rust-version = "1.91.1"
 
 [workspace.dependencies]
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 bincode = "2"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1" }
 dashmap = "5"
+anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
+clap = "4"
 tracing-subscriber = "0.3"
 bytes = "1"
 
 # Testing and benchmarking
 criterion = "0.7"
 tokio-test = "0.4"
-
-# Development tools
-once_cell = "1.0"
