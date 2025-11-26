@@ -105,7 +105,7 @@ impl ChatServer {
     let (mut reader, mut writer) = stream.into_split();
 
     let mut buffer = vec![0u8; 4096];
-    let mut username;
+    let mut username: Option<String>;
 
     loop {
       match read_message_from_stream(&mut reader, &mut buffer).await {
@@ -148,33 +148,43 @@ impl ChatServer {
     info!("User {} joined the chat", user);
 
     loop {
-      let message = read_message_from_stream(&mut reader, &mut buffer).await;
-      match message {
-        Ok(ClientMessage::Join { username: _ }) => {}
-        Ok(ClientMessage::Leave { username: user }) => {
-          if let Some((_, join_handle)) = users.remove(&user) {
-            join_handle.abort();
-          }
-          info!("User {} left the chat", user);
+      tokio::select! {
+        message_result = read_message_from_stream(&mut reader, &mut buffer) => {
+          match message_result {
+            Ok(ClientMessage::Join { username: _ }) => {}
+            Ok(ClientMessage::Leave { username: user }) => {
+              if let Some((_, join_handle)) = users.remove(&user) {
+                join_handle.abort();
+              }
+              info!("User {} left the chat", user);
 
-          let leave_notification = ServerMessage::UserLeft {
-            username: user.clone(),
-          };
-          Self::broadcast_message(&broadcaster, &users, leave_notification, &user).await?;
-          break;
+              let leave_notification = ServerMessage::UserLeft {
+                username: user.clone(),
+              };
+              Self::broadcast_message(&broadcaster, &users, leave_notification, &user).await?;
+              break;
+            }
+            Ok(ClientMessage::Message {
+              username: user,
+              content,
+            }) => {
+              let message_notification = ServerMessage::Message {
+                username: user.clone(),
+                content: content.clone(),
+              };
+              Self::broadcast_message(&broadcaster, &users, message_notification, &user).await?;
+              info!("Message from {}: {}", user, content);
+            }
+            Err(ApplicationError::ClientReadStreamClosed) => {
+              info!("Client disconnected");
+              break;
+            }
+            Err(_) => {
+              // Handle other read errors
+              break;
+            }
+          }
         }
-        Ok(ClientMessage::Message {
-          username: user,
-          content,
-        }) => {
-          let message_notification = ServerMessage::Message {
-            username: user.clone(),
-            content: content.clone(),
-          };
-          Self::broadcast_message(&broadcaster, &users, message_notification, &user).await?;
-          info!("Message from {}: {}", user, content);
-        }
-        _ => {}
       }
     }
 

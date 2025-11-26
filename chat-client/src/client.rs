@@ -40,6 +40,7 @@ impl ChatClient {
     let mut shutdown_signal = Box::pin(signal::ctrl_c());
     let mut should_shutdown = false;
 
+    println!();
     println!("Welcome to the chat! Commands: 'send <message>', 'leave'");
     info!("Client event loop started for user: {}", self.username);
 
@@ -60,7 +61,9 @@ impl ChatClient {
               match result {
                   Ok(0) => {
                       info!("Server disconnected unexpectedly");
-                      println!("Server disconnected");
+                      println!();
+                      println!("❌❌: Server disconnected!❌❌ press ENTER ↩️ to exit!");
+                      println!();
                       break;
                   }
                   Ok(n) => {
@@ -149,13 +152,13 @@ impl ChatClient {
         println!("❌: {}", reason);
       }
       ServerMessage::Success { message } => {
-        println!("❕: {}", message);
+        println!("💐: {}", message);
       }
       ServerMessage::UserJoined { username } => {
-        println!("⚠️: `{}` joined the chat", username);
+        println!("📢: `{}` joined the chat", username);
       }
       ServerMessage::UserLeft { username } => {
-        println!("⚠️: `{}` left the chat", username);
+        println!("📢: `{}` left the chat", username);
       }
     }
     Ok(())
@@ -198,13 +201,13 @@ impl ChatClient {
     Ok(())
   }
 
-  async fn send_client_message(&mut self, message: ClientMessage) -> Result<()> {
+  pub async fn send_client_message(&mut self, message: ClientMessage) -> Result<()> {
     let frame = encode_message(&message)?;
     self.writer.write_all(&frame).await?;
     Ok(())
   }
 
-  async fn graceful_leave(&mut self) -> Result<()> {
+  pub async fn graceful_leave(&mut self) -> Result<()> {
     info!("Sending leave message for user: {}", self.username);
     let message = ClientMessage::Leave {
       username: self.username.clone(),

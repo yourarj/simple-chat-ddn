@@ -188,7 +188,6 @@ mod tests {
 
     let invalid_data = vec![0xFF, 0xFF, 0xFF, 0xFF];
     if bincode::decode_from_slice::<String, _>(&invalid_data, bincode::config::standard()).is_ok() {
-    } else {
     }
   }
 }
