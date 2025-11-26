@@ -35,6 +35,14 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
         
+    - name: Check formatting
+      run: |
+        cargo fmt
+        
+    - name: Check for clippy
+      run: |
+        cargo clippy --workspace
+        
     - name: Build the project
       run: |
         cargo build --workspace

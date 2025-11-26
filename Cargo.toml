@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["chat-client", "chat-core", "chat-server"]
-default-members = ["chat-core"]
+default-members = ["chat-client", "chat-core", "chat-server"]
 exclude = ["developer-tools"]
 
 [workspace.package]
@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["full"] }
 bincode = "2"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1" }
-dashmap = "5"
+dashmap = "6"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
