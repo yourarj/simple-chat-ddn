@@ -1,0 +1,114 @@
+name: Chat Server Test
+
+on:
+  push:
+    branches:
+      - '**'  # Trigger on pushes to any branch
+      - main   # Specifically include main branch
+
+jobs:
+  test-chat:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Rust
+      uses: rust-lang/setup-rust@v1
+      with:
+        toolchain: stable
+        cache: Cargo
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lsof
+        
+    - name: Build the project
+      run: |
+        cargo build --workspace
+        
+    - name: Verify binaries can be executed
+      run: |
+        ./target/debug/chat-server --help
+        ./target/debug/chat-client --help
+        
+    - name: Start chat server
+      run: |
+        nohup cargo run --bin chat-server -- --host 127.0.0.1 --port 8080 --max-connections 100 > server.log 2>&1 &
+        SERVER_PID=$!
+        
+        # save the server PID for cleanup in later phase
+        echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+        
+        # Wait a moment for the server to start (technically not required as it's rust 😉)
+        sleep 3
+        
+        # Check if server is running and listening on the port
+        if kill -0 $SERVER_PID 2>/dev/null; then
+          echo "Server started successfully with PID $SERVER_PID"
+          if lsof -i :8080 >/dev/null 2>&1; then
+            echo "Server is listening on port 8080"
+          else
+            echo "Server is not listening on port 8080"
+            cat server.log
+            exit 1
+          fi
+        else
+          echo "Server failed to start"
+          cat server.log
+          exit 1
+        fi
+        
+    - name: Test client connection and message sending
+      run: |
+        echo "Testing first client connection..."
+        {
+          echo "send Hello from test client"
+          echo "leave"
+        } | cargo run --bin chat-client -- --host 127.0.0.1 --port 8080 --username testuser1
+        
+        echo "Testing second client connection..."
+        {
+          echo "send Hello from second client"
+          echo "leave"
+        } | cargo run --bin chat-client -- --host 127.0.0.1 --port 8080 --username testuser2
+        
+        # Test 3: Test username collision detection
+        echo "Testing username collision..."
+        {
+          echo "send Message from duplicate user"
+          echo "leave"
+        } | cargo run --bin chat-client -- --host 127.0.0.1 --port 8080 --username testuser1 &
+        
+        sleep 1
+        wait
+        
+        echo "Everything is fine"
+        
+    - name: Stop chat server
+      run: |
+        if [ ! -z "$SERVER_PID" ]; then
+          kill $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
+          echo "server stopped"
+          
+          echo "=== Server Logs ==="
+          cat server.log
+          echo "=== End Server Logs ==="
+        fi
+        
+    - name: Verify no processes left running
+      run: |
+        if command -v lsof >/dev/null 2>&1; then
+          if lsof -i :8080 >/dev/null 2>&1; then
+            echo "Warning: Port 8080 still in use after server shutdown"
+            lsof -i :8080
+            exit 1
+          else
+            echo "Port 8080 is free"
+          fi
+        else
+          echo "lsof not available, skipping port check"
+        fi
