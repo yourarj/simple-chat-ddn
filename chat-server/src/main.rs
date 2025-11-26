@@ -1,4 +1,3 @@
-// server/src/main.rs
 use anyhow::Result;
 use chat_server::server::ChatServer;
 use clap::Parser;
@@ -27,14 +26,11 @@ async fn main() -> Result<()> {
   let server = ChatServer::new(args.max_connections);
   let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-  // Start signal handler
   let shutdown_signal = shutdown_signal(shutdown_tx);
 
-  // Start server
   let server_task =
     tokio::spawn(async move { server.run(&args.host, args.port, shutdown_rx).await });
 
-  // Wait for either server completion or shutdown signal
   tokio::select! {
     _ = shutdown_signal => {
       tracing::info!("Shutdown signal received, server will shutdown gracefully");
@@ -50,7 +46,6 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
-/// Gracefully shutdown signal handler
 async fn shutdown_signal(shutdown_tx: oneshot::Sender<()>) {
   let ctrl_c = async {
     signal::ctrl_c()
@@ -76,6 +71,5 @@ async fn shutdown_signal(shutdown_tx: oneshot::Sender<()>) {
 
   tracing::info!("Shutdown signal received, starting graceful shutdown...");
 
-  // Send shutdown signal to server
   let _ = shutdown_tx.send(());
 }

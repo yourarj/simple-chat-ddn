@@ -1,4 +1,3 @@
-// client/src/main.rs
 use anyhow::Result;
 use chat_client::client::ChatClient;
 use clap::Parser;

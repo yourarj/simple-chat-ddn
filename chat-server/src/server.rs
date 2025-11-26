@@ -1,4 +1,3 @@
-// server/src/lib.rs
 use anyhow::Result;
 use chat_core::error::ApplicationError;
 use chat_core::protocol::{ClientMessage, ServerMessage, encode_message};
@@ -16,20 +15,17 @@ use tracing::{error, info, warn};
 
 type UserMap = Arc<DashMap<String, JoinHandle<Result<(), ApplicationError>>>>;
 
-/// High-performance chat server supporting 1M+ concurrent users
 pub struct ChatServer {
   users: UserMap,
   max_connections: usize,
   broadcaster: Arc<Sender<ServerMessage>>,
 }
 
-/// Shutdown signal for graceful server shutdown
 pub type ShutdownSignal = oneshot::Receiver<()>;
 
 impl ChatServer {
   pub fn new(max_connections: usize) -> Self {
-    // Create broadcast channel for this user
-    let (tx, _) = broadcast::channel(10_000); // Buffer 100 messages
+    let (tx, _) = broadcast::channel(10_000);
     Self {
       users: Arc::new(DashMap::new()),
       broadcaster: Arc::new(tx),
@@ -37,7 +33,6 @@ impl ChatServer {
     }
   }
 
-  /// Start the chat server on specified host and port
   pub async fn run(&self, host: &str, port: u16, mut shutdown_rx: ShutdownSignal) -> Result<()> {
     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
     info!("Chat server listening on {}:{}", host, port);
@@ -64,14 +59,14 @@ impl ChatServer {
                 if let Err(e) = Self::handle_client(stream, broadcaster, users).await {
                   error!("Client handler error: {}", e);
                 }
-                drop(permit); // Release connection permit
+                drop(permit);
               });
             }
             Err(e) => {
               error!("Accept error: {}", e);
               tracing::debug!("Accept failed, releasing permit");
-              // Note: We can't access permit here since it's created inside the match arm
-              // This is a limitation of the current structure
+
+
             }
           }
         }
@@ -79,17 +74,13 @@ impl ChatServer {
     }
   }
 
-  /// Gracefully shutdown the server
   async fn shutdown(&self) -> Result<()> {
     info!("Starting graceful shutdown...");
 
-    // Close the broadcast channel to signal all clients to disconnect
     drop(Arc::clone(&self.broadcaster));
 
-    // Wait a bit to allow current messages to be processed
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Abort all user tasks
     let mut user_tasks = Vec::new();
     for entry in self.users.iter() {
       if let Some((_, join_handle)) = self.users.remove(entry.key()) {
@@ -97,7 +88,6 @@ impl ChatServer {
       }
     }
 
-    // Wait for all user tasks to complete
     for join_handle in user_tasks {
       join_handle.abort();
       let _ = join_handle.await;
@@ -107,7 +97,6 @@ impl ChatServer {
     Ok(())
   }
 
-  /// Handle individual client connection
   async fn handle_client(
     stream: TcpStream,
     broadcaster: Arc<Sender<ServerMessage>>,
@@ -115,7 +104,7 @@ impl ChatServer {
   ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    let mut buffer = vec![0u8; 4096]; // Reusable buffer to avoid allocations
+    let mut buffer = vec![0u8; 4096];
     let mut username;
 
     loop {
@@ -145,13 +134,12 @@ impl ChatServer {
 
     let user = username.ok_or(ApplicationError::UsernameNotFound)?;
 
-    // subscription
     let rec = broadcaster.subscribe();
 
     let join_handle = crate::broadcast::spawn_broadcast_dispatcher(rec, user.clone(), writer);
     users.insert(user.clone(), join_handle);
     username = Some(user.clone());
-    // Broadcast join notification
+
     let join_notification = ServerMessage::UserJoined {
       username: user.clone(),
     };
@@ -162,16 +150,13 @@ impl ChatServer {
     loop {
       let message = read_message_from_stream(&mut reader, &mut buffer).await;
       match message {
-        Ok(ClientMessage::Join { username: _ }) => {
-          // Ignore additional join messages
-        }
+        Ok(ClientMessage::Join { username: _ }) => {}
         Ok(ClientMessage::Leave { username: user }) => {
           if let Some((_, join_handle)) = users.remove(&user) {
             join_handle.abort();
           }
           info!("User {} left the chat", user);
 
-          // Broadcast leave notification using new message type
           let leave_notification = ServerMessage::UserLeft {
             username: user.clone(),
           };
@@ -182,7 +167,6 @@ impl ChatServer {
           username: user,
           content,
         }) => {
-          // Broadcast the message to other users using new message type
           let message_notification = ServerMessage::Message {
             username: user.clone(),
             content: content.clone(),
@@ -190,13 +174,10 @@ impl ChatServer {
           Self::broadcast_message(&broadcaster, &users, message_notification, &user).await?;
           info!("Message from {}: {}", user, content);
         }
-        _ => {
-          // Handle errors gracefully
-        }
+        _ => {}
       }
     }
 
-    // Cleanup on disconnect
     if let Some(user) = username {
       tracing::debug!("Cleaning up disconnected user: {}", user);
       if let Some((_, join_handle)) = users.remove(&user) {
@@ -208,7 +189,6 @@ impl ChatServer {
     Ok(())
   }
 
-  /// Broadcast message to all users except sender
   async fn broadcast_message(
     broadcaster: &Arc<Sender<ServerMessage>>,
     users: &UserMap,
@@ -217,7 +197,6 @@ impl ChatServer {
   ) -> Result<()> {
     let mut failed_users = Vec::new();
 
-    // Use dashmap's sharded locking for efficient concurrent iteration
     for entry in users.iter() {
       let user = entry.key();
       if user == exclude_user {
@@ -230,7 +209,6 @@ impl ChatServer {
       }
     }
 
-    // Clean up failed users (channels closed)
     for user in failed_users {
       users.remove(&user);
     }
@@ -247,38 +225,186 @@ mod tests {
   async fn test_server_creation() {
     let server = ChatServer::new(100);
     assert_eq!(server.users.len(), 0);
+    assert_eq!(server.max_connections, 100);
+
+    let _subscriber = server.broadcaster.subscribe();
   }
 
   #[tokio::test]
-  async fn test_message_broadcast() {
-    // let users = Arc::new(DashMap::new());
-    // let (tx1, mut rx1) = broadcast::channel(10);
-    // let (tx2, mut rx2) = broadcast::channel(10);
+  async fn test_server_creation_with_zero_connections() {
+    let server = ChatServer::new(0);
+    assert_eq!(server.max_connections, 0);
 
-    // users.insert("user1".to_string(), tx1);
-    // users.insert("user2".to_string(), tx2);
+    assert_eq!(server.users.len(), 0);
+  }
 
-    // ChatServer::broadcast_message(tx1, &users, "user1", "test message", "user1")
-    //   .await
-    //   .unwrap();
+  #[tokio::test]
+  async fn test_graceful_shutdown() {
+    let server = ChatServer::new(10);
 
-    // // user1 should not receive their own message
-    // tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
-    //   .await
-    //   .unwrap_err();
+    let result = server.shutdown().await;
+    assert!(result.is_ok());
+  }
 
-    // // user2 should receive the message
-    // let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
-    //   .await
-    //   .unwrap()
-    //   .unwrap();
+  #[tokio::test]
+  async fn test_user_map_operations() {
+    let server = ChatServer::new(100);
 
-    // match received {
-    //   ChatMessage::Message { username, content } => {
-    //     assert_eq!(username, "user1");
-    //     assert_eq!(content, "test message");
-    //   }
-    //   _ => panic!("Unexpected message type"),
-    // }
+    assert_eq!(server.users.len(), 0);
+
+    let test_user = "testuser";
+    let join_handle = tokio::spawn(async move { Ok::<(), ApplicationError>(()) });
+    server.users.insert(test_user.to_string(), join_handle);
+
+    assert_eq!(server.users.len(), 1);
+    assert!(server.users.contains_key(test_user));
+
+    if let Some((_, join_handle)) = server.users.remove(test_user) {
+      join_handle.abort();
+    }
+
+    assert_eq!(server.users.len(), 0);
+    assert!(!server.users.contains_key(test_user));
+  }
+
+  #[tokio::test]
+  async fn test_username_collision_detection() {
+    let server = ChatServer::new(100);
+
+    let test_user = "testuser";
+
+    let join_handle1 = tokio::spawn(async move { Ok::<(), ApplicationError>(()) });
+    let join_handle2 = tokio::spawn(async move { Ok::<(), ApplicationError>(()) });
+
+    server.users.insert(test_user.to_string(), join_handle1);
+    assert!(server.users.contains_key(test_user));
+
+    server.users.insert(test_user.to_string(), join_handle2);
+    assert!(server.users.contains_key(test_user));
+    assert_eq!(server.users.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn test_broadcast_message_empty_users() {
+    let server = ChatServer::new(100);
+
+    let test_message = ServerMessage::Message {
+      username: "sender".to_string(),
+      content: "Hello everyone!".to_string(),
+    };
+
+    let result =
+      ChatServer::broadcast_message(&server.broadcaster, &server.users, test_message, "sender")
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(server.users.len(), 0);
+  }
+
+  #[test]
+  fn test_application_error_variants() {
+    let errors = vec![
+      ApplicationError::ClientReadStreamClosed,
+      ApplicationError::IncompleteLengthPrefix,
+      ApplicationError::IncompletePyaload,
+      ApplicationError::UsernameNotFound,
+    ];
+
+    for error in errors {
+      let error_string = format!("{}", error);
+      assert!(!error_string.is_empty(), "Error should have a description");
+
+      let _debug_string = format!("{:?}", error);
+    }
+  }
+
+  #[tokio::test]
+  async fn test_multiple_server_instances() {
+    let server1 = ChatServer::new(50);
+    let server2 = ChatServer::new(100);
+
+    assert_eq!(server1.max_connections, 50);
+    assert_eq!(server2.max_connections, 100);
+    assert_eq!(server1.users.len(), 0);
+    assert_eq!(server2.users.len(), 0);
+
+    let _subscriber1 = server1.broadcaster.subscribe();
+    let _subscriber2 = server2.broadcaster.subscribe();
+
+    let join_handle = tokio::spawn(async move { Ok::<(), ApplicationError>(()) });
+    server1.users.insert("user1".to_string(), join_handle);
+
+    assert_eq!(server1.users.len(), 1);
+    assert_eq!(server2.users.len(), 0);
+    assert!(server1.users.contains_key("user1"));
+    assert!(!server2.users.contains_key("user1"));
+  }
+
+  #[test]
+  fn test_connection_limiter_creation() {
+    let server = ChatServer::new(10);
+
+    let connection_limiter = tokio::sync::Semaphore::new(server.max_connections);
+    assert_eq!(connection_limiter.available_permits(), 10);
+
+    let permit1 = connection_limiter.try_acquire().unwrap();
+    assert_eq!(connection_limiter.available_permits(), 9);
+
+    let permit2 = connection_limiter.try_acquire().unwrap();
+    assert_eq!(connection_limiter.available_permits(), 8);
+
+    drop(permit1);
+    drop(permit2);
+
+    assert_eq!(connection_limiter.available_permits(), 10);
+  }
+
+  #[test]
+  fn test_large_server_capacity() {
+    let server = ChatServer::new(1_000_000);
+    assert_eq!(server.max_connections, 1_000_000);
+
+    assert_eq!(server.users.len(), 0);
+    let _subscriber = server.broadcaster.subscribe();
+  }
+
+  #[test]
+  fn test_server_message_username_extraction_comprehensive() {
+    let messages_with_usernames = vec![
+      ServerMessage::Message {
+        username: "alice".to_string(),
+        content: "Hello".to_string(),
+      },
+      ServerMessage::UserJoined {
+        username: "bob".to_string(),
+      },
+      ServerMessage::UserLeft {
+        username: "charlie".to_string(),
+      },
+    ];
+
+    let messages_without_usernames = vec![
+      ServerMessage::Success {
+        message: "Welcome!".to_string(),
+      },
+      ServerMessage::Error {
+        reason: "Error occurred".to_string(),
+      },
+    ];
+
+    for message in &messages_with_usernames {
+      assert!(message.username().is_some(), "Message should have username");
+      assert!(
+        !message.username().unwrap().is_empty(),
+        "Username should not be empty"
+      );
+    }
+
+    for message in &messages_without_usernames {
+      assert!(
+        message.username().is_none(),
+        "Message should not have username"
+      );
+    }
   }
 }
