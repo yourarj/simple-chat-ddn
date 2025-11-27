@@ -159,6 +159,7 @@ async fn test_server_message_handling() -> Result<(), ApplicationError> {
     "Should be able to send message to server"
   );
 
+  writer.shutdown().await?;
   let _ = shutdown_tx.send(());
 
   let result = timeout(Duration::from_secs(5), server_handle).await;
@@ -200,6 +201,7 @@ async fn test_server_error_recovery() -> Result<(), ApplicationError> {
   let random_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
   let _ = writer.write_all(&random_data).await;
 
+  writer.shutdown().await?;
   let _ = shutdown_tx.send(());
   let _ = server_handle.await;
   Ok(())
