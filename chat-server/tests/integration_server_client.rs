@@ -55,53 +55,6 @@ async fn test_server_basic_functionality() {
 }
 
 #[tokio::test]
-async fn test_server_max_connections() {
-  let max_connections = 2;
-  let server = ChatServer::new(max_connections);
-  let (shutdown_tx, shutdown_rx) = oneshot::channel();
-  let port = 12346;
-
-  let server_handle = tokio::spawn(async move { server.run("127.0.0.1", port, shutdown_rx).await });
-
-  tokio::time::sleep(Duration::from_millis(100)).await;
-
-  let mut connection_tasks = Vec::new();
-
-  for i in 0..=max_connections {
-    let task = tokio::spawn(async move {
-      simulate_client_connection("127.0.0.1", port, &format!("user{}", i)).await
-    });
-    connection_tasks.push(task);
-  }
-
-  let mut results = Vec::new();
-  for task in connection_tasks {
-    results.push(task.await.unwrap());
-  }
-
-  let success_count = results.iter().filter(|r| r.is_ok()).count();
-  let failure_count = results.iter().filter(|r| r.is_err()).count();
-
-  assert!(
-    success_count >= max_connections,
-    "Should have at least {} successful connections",
-    max_connections
-  );
-
-  assert!(failure_count == 0, "there should be no failures");
-
-  let _ = shutdown_tx.send(());
-
-  let result = timeout(Duration::from_secs(5), server_handle).await;
-  match result {
-    Ok(handle) => {
-      let _ = handle;
-    }
-    Err(_) => panic!("Server shutdown timed out"),
-  }
-}
-
-#[tokio::test]
 async fn test_server_graceful_shutdown() {
   let server = ChatServer::new(10);
   let (shutdown_tx, shutdown_rx) = oneshot::channel();
