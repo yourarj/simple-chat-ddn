@@ -1,5 +1,20 @@
 # Simple Chat
 
+<iframe title="vimeo-player" src="https://player.vimeo.com/video/1141420619?h=ee4bbe144d" width="640" height="360" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share"   allowfullscreen></iframe>
+
+## 🪶 Features
+- **Protocol**: Custom binary protocol over TCP for effciency and throghput avoided json over websockets
+- **Least Cloning**: efficient broadcasting,  optimized for least message cloning regardless of scale
+- **Least Serialization effort**: O(1) effort for message serialization regardless of amount of receivers with smart caching
+- **Resource efficient**: Easy on memory and cpu
+- **Graceful shutdowns**: graceful shutdowns for server and client
+
+## 🫣 Out of Scope
+
+- Encryption in transit
+- State machines implemented at protocol levels
+
+
 ## Summary
 
 You have been tasked with writing a simple asynchronous chat server and CLI
