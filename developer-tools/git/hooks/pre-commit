@@ -64,7 +64,7 @@ print_status "Code compiles successfully"
 # Run clippy for linting
 echo ""
 echo "🔍 Running clippy linter..."
-if ! cargo clippy --all --all-features -- -D warnings; then
+if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
     print_error "Clippy found issues. Please fix them or use 'allow' if appropriate."
     echo ""
     echo "💡 To see clippy suggestions:"
