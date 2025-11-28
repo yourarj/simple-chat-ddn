@@ -1,4 +1,19 @@
 # Simple Chat
+## 🎥 Demo Video
+[Watch Demo (vimeo)](https://vimeo.com/1141420619?fl=pl&fe=sh)
+
+## 🪶 Features
+- **Protocol**: Custom binary protocol over TCP for effciency and throghput avoided json over websockets
+- **Least Cloning**: efficient broadcasting,  optimized for least message cloning regardless of scale
+- **Least Serialization effort**: O(1) effort for message serialization regardless of amount of receivers with smart caching
+- **Resource efficient**: Easy on memory and cpu
+- **Graceful shutdowns**: graceful shutdowns for server and client
+
+## 🫣 Out of Scope
+
+- Encryption in transit
+- State machines implemented at protocol levels
+
 
 ## Summary
 
