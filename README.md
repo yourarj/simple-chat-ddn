@@ -1,6 +1,6 @@
 # Simple Chat
-
-<iframe title="vimeo-player" src="https://player.vimeo.com/video/1141420619?h=ee4bbe144d" width="640" height="360" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share"   allowfullscreen></iframe>
+## 🎥 Demo Video
+[Watch Demo (vimeo)](https://vimeo.com/1141420619?fl=pl&fe=sh)
 
 ## 🪶 Features
 - **Protocol**: Custom binary protocol over TCP for effciency and throghput avoided json over websockets
