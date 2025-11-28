@@ -394,13 +394,10 @@ async fn test_server_username_validation_integration() -> Result<(), Application
     .await
     .unwrap_or(Err(ApplicationError::ClientReadStreamClosed));
 
-    if response2.is_ok() {
-      match response2.unwrap() {
-        ServerMessage::Error { reason } => {
-          assert!(reason.contains("username") || reason.contains("invalid"));
-        }
-        _ => {}
-      }
+    if let Ok(resp2) = response2
+      && let ServerMessage::Error { reason } = resp2
+    {
+      assert!(reason.contains("username") || reason.contains("invalid"));
     }
 
     let _ = writer2.shutdown().await;
