@@ -85,7 +85,7 @@ mod tests {
     let (tx, _) = broadcast::channel(10);
     let broadcaster = Arc::new(tx);
     let pool = BroadcastPool::new(broadcaster.clone());
-    
+
     assert!(Arc::ptr_eq(&pool.broadcaster, &broadcaster));
   }
 
@@ -93,7 +93,7 @@ mod tests {
   fn test_broadcast_pool_has() {
     let (tx, _) = broadcast::channel(10);
     let pool = BroadcastPool::new(Arc::new(tx));
-    
+
     assert!(!pool.has("testuser"));
   }
 
@@ -101,7 +101,7 @@ mod tests {
   fn test_broadcast_pool_destroy_dispatcher() {
     let (tx, _) = broadcast::channel(10);
     let pool = BroadcastPool::new(Arc::new(tx));
-    
+
     pool.destroy_dispatcher("nonexistent");
   }
 
@@ -109,7 +109,7 @@ mod tests {
   async fn test_broadcast_pool_shutdown() {
     let (tx, _) = broadcast::channel(10);
     let pool = BroadcastPool::new(Arc::new(tx));
-    
+
     let result = pool.shutdown().await;
     assert!(result.is_ok());
   }

@@ -200,7 +200,6 @@ async fn test_transport_layer_tcp_communication() {
       .await
       .unwrap();
 
-
     writer.shutdown().await.unwrap();
 
     received_message
@@ -213,7 +212,6 @@ async fn test_transport_layer_tcp_communication() {
     write_message_to_stream(&mut writer, &test_message)
       .await
       .unwrap();
-
 
     writer.shutdown().await.unwrap();
 
@@ -305,7 +303,6 @@ async fn test_large_message_handling() {
     write_message_to_stream(&mut writer, &test_message)
       .await
       .unwrap();
-
 
     writer.shutdown().await.unwrap();
   });
@@ -404,17 +401,13 @@ async fn test_message_cache_integration() {
     },
   ];
 
-
   for message in test_messages.iter() {
     let hash = MessageCache::hash_message(message).unwrap();
 
-
     assert!(cache.get(hash).await.is_none());
-
 
     let encoded = encode_message(message).unwrap();
     cache.put(hash, encoded.clone()).await;
-
 
     let cached = cache.get(hash).await;
     assert!(cached.is_some());
@@ -435,23 +428,14 @@ async fn test_error_propagation_integration() {
     let result: Result<ClientMessage, ApplicationError> =
       read_message_from_stream(&mut reader, &mut buffer).await;
 
-
     match result {
       Ok(_) => {
-
         println!("Unexpectedly received valid message from malformed data");
       }
-      Err(ApplicationError::Decoding(_)) => {
-
-      }
-      Err(ApplicationError::Encoding(_)) => {
-
-      }
-      Err(ApplicationError::StreamIoError(_)) => {
-
-      }
+      Err(ApplicationError::Decoding(_)) => {}
+      Err(ApplicationError::Encoding(_)) => {}
+      Err(ApplicationError::StreamIoError(_)) => {}
       Err(e) => {
-
         println!("Got unexpected error: {:?}", e);
       }
     }
@@ -461,10 +445,8 @@ async fn test_error_propagation_integration() {
     let stream = TcpStream::connect(addr).await.unwrap();
     let (_, mut writer) = stream.into_split();
 
-
     let malformed_data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF];
     let _ = writer.write_all(&malformed_data).await;
-
 
     let _ = writer.shutdown().await;
   });
@@ -475,7 +457,6 @@ async fn test_error_propagation_integration() {
 
 #[tokio::test]
 async fn test_message_size_limits_integration() {
-
   let huge_content = "x".repeat(10_000);
   let test_message = ClientMessage::Message {
     username: "biguser".to_string(),
@@ -504,7 +485,6 @@ async fn test_message_size_limits_integration() {
     write_message_to_stream(&mut writer, &test_message)
       .await
       .unwrap();
-
 
     writer.shutdown().await.unwrap();
   });

@@ -57,7 +57,7 @@ pub fn spawn_broadcast_dispatcher(
 mod tests {
   use super::*;
   use chat_core::protocol::encode_message;
-use tokio::sync::broadcast;
+  use tokio::sync::broadcast;
 
   #[test]
   fn test_message_username_extraction() {

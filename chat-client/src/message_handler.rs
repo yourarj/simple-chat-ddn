@@ -48,7 +48,7 @@ mod tests {
       username: "alice".to_string(),
       content: "Hello everyone!".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());
@@ -59,7 +59,7 @@ mod tests {
     let message = ServerMessage::Error {
       reason: "Test error".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());
@@ -70,7 +70,7 @@ mod tests {
     let message = ServerMessage::Success {
       message: "Welcome to chat!".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());
@@ -81,7 +81,7 @@ mod tests {
     let message = ServerMessage::UserJoined {
       username: "bob".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());
@@ -92,7 +92,7 @@ mod tests {
     let message = ServerMessage::UserLeft {
       username: "charlie".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());
@@ -103,7 +103,7 @@ mod tests {
     let message = ServerMessage::UserNameAlreadyTaken {
       username: "takenuser".to_string(),
     };
-    
+
     let encoded = encode_message(&message).unwrap();
     let result = handle_server_message(&encoded).await;
     assert!(result.is_ok());

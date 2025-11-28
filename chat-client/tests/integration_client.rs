@@ -174,9 +174,7 @@ async fn test_client_error_handling_and_edge_cases() -> Result<()> {
 
   sleep(Duration::from_millis(100)).await;
 
-
   let client_result = ChatClient::new("127.0.0.1", addr.port(), "testuser").await;
-
 
   if let Ok(mut client) = client_result {
     let test_message = ClientMessage::Message {
@@ -311,7 +309,6 @@ async fn test_client_protocol_compliance_and_message_serialization() -> Result<(
 
 #[tokio::test]
 async fn test_client_connection_cleanup() -> Result<()> {
-
   let listener = TcpListener::bind("127.0.0.1:0").await?;
   let addr = listener.local_addr()?;
 
@@ -320,10 +317,8 @@ async fn test_client_connection_cleanup() -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
     let mut buffer = vec![0u8; 1024];
-    
 
     let _n = reader.read(&mut buffer).await.unwrap();
-
 
     let success_msg = ServerMessage::Success {
       message: "Welcome to the chat!".to_string(),
@@ -331,10 +326,8 @@ async fn test_client_connection_cleanup() -> Result<()> {
     let response = encode_message(&success_msg).unwrap();
     writer.write_all(&response).await.unwrap();
     writer.flush().await.unwrap();
-    
 
     let _n = reader.read(&mut buffer).await.unwrap_or(0);
-    
 
     let _ = writer.shutdown().await;
   });
@@ -342,16 +335,13 @@ async fn test_client_connection_cleanup() -> Result<()> {
   sleep(Duration::from_millis(100)).await;
 
   let mut client = ChatClient::new("127.0.0.1", addr.port(), "cleanup_test").await?;
-  
 
   let test_message = ClientMessage::Message {
     username: "cleanup_test".to_string(),
     content: "Testing connection cleanup".to_string(),
   };
-  
 
   client.send_client_message(test_message).await?;
-  
 
   client.graceful_leave().await?;
 

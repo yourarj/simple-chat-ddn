@@ -38,7 +38,7 @@ mod tests {
   fn test_generate_unique_id() {
     let id1 = generate_unique_id();
     let id2 = generate_unique_id();
-    
+
     assert!(id1.starts_with("id_"));
     assert!(id2.starts_with("id_"));
     assert_ne!(id1, id2);
@@ -47,7 +47,7 @@ mod tests {
   #[test]
   fn test_validate_username_valid() {
     let valid_usernames = vec!["alice", "user123", "test_user", "a"];
-    
+
     for username in valid_usernames {
       assert!(validate_username(username).is_ok());
     }
