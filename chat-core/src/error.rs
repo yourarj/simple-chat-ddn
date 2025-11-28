@@ -4,12 +4,12 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ApplicationError {
-  #[error("Error in encoding")]
+  #[error("Encoding error: {0}")]
   Encoding(#[from] bincode::error::EncodeError),
-  #[error("Error in decoding")]
+  #[error("Decoding error: {0}")]
   Decoding(#[from] bincode::error::DecodeError),
-  #[error("Error in decoding")]
-  StreamWriteError(#[from] io::Error),
+  #[error("Stream I/O error: {0}")]
+  StreamIoError(#[from] io::Error),
   #[error("Client stream closed")]
   ClientReadStreamClosed,
   #[error("Incomplete length prefix")]
@@ -18,6 +18,29 @@ pub enum ApplicationError {
   IncompletePyaload,
   #[error("username not found")]
   UsernameNotFound,
+  #[error("Message too large: {size} bytes exceeds maximum of {max_size} bytes")]
+  MessageTooLarge { size: usize, max_size: usize },
+  #[error("Invalid ussername: {0}")]
+  InvalidUsername(String),
+  #[error("Connection error: {0}")]
+  ConnectionError(String),
+  #[error("Broadcast error: {0}")]
+  BroadcastError(String),
+}
+
+impl ApplicationError {
+  pub fn message_too_large(size: usize, max_size: usize) -> Self {
+    ApplicationError::MessageTooLarge { size, max_size }
+  }
+  pub fn invalid_username(reason: String) -> Self {
+    ApplicationError::InvalidUsername(reason)
+  }
+  pub fn connection_error(reason: String) -> Self {
+    ApplicationError::ConnectionError(reason)
+  }
+  pub fn broadcast_error(reason: String) -> Self {
+    ApplicationError::BroadcastError(reason)
+  }
 }
 
 #[cfg(test)]
@@ -50,7 +73,7 @@ mod tests {
       let app_error: ApplicationError = decode_error.into();
 
       assert!(matches!(app_error, ApplicationError::Decoding(_)));
-      assert!(app_error.to_string().contains("Error in decoding"));
+      assert!(app_error.to_string().contains("Decoding error"));
     }
   }
 
@@ -59,8 +82,8 @@ mod tests {
     let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Connection lost");
     let app_error: ApplicationError = io_error.into();
 
-    assert!(matches!(app_error, ApplicationError::StreamWriteError(_)));
-    assert!(app_error.to_string().contains("Error in decoding"));
+    assert!(matches!(app_error, ApplicationError::StreamIoError(_)));
+    assert!(app_error.to_string().contains("Stream I/O error"));
   }
 
   #[test]
@@ -93,7 +116,7 @@ mod tests {
     let app_error: ApplicationError = io_error.into();
 
     let display_string = format!("{}", app_error);
-    assert!(display_string.contains("Error in decoding"));
+    assert!(display_string.contains("Stream I/O error"));
   }
 
   #[test]
@@ -146,9 +169,9 @@ mod tests {
     let nested_io_error = std::io::Error::other("Deep nested error");
     let app_error: ApplicationError = nested_io_error.into();
 
-    assert!(matches!(app_error, ApplicationError::StreamWriteError(_)));
+    assert!(matches!(app_error, ApplicationError::StreamIoError(_)));
 
-    if let ApplicationError::StreamWriteError(io_err) = &app_error {
+    if let ApplicationError::StreamIoError(io_err) = &app_error {
       assert_eq!(io_err.to_string(), "Deep nested error");
     }
   }
@@ -162,19 +185,19 @@ mod tests {
     let io_error = std::io::Error::other("Debug test");
     let app_error: ApplicationError = io_error.into();
     let debug_string = format!("{:?}", app_error);
-    assert!(debug_string.contains("StreamWriteError"));
+    assert!(debug_string.contains("StreamIoError"));
   }
 
   #[test]
   fn test_error_edge_cases() {
     let empty_io_error = std::io::Error::other("");
     let app_error: ApplicationError = empty_io_error.into();
-    assert!(app_error.to_string().contains("Error in decoding"));
+    assert!(app_error.to_string().contains("Stream I/O error"));
 
     let long_message = "A".repeat(1000);
     let long_io_error = std::io::Error::other(long_message);
     let app_error: ApplicationError = long_io_error.into();
-    assert!(app_error.to_string().contains("Error in decoding"));
+    assert!(app_error.to_string().contains("Stream I/O error"));
   }
 
   #[test]

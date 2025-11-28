@@ -3,6 +3,7 @@ use chat_core::{
   protocol::{ClientMessage, LENGTH_PREFIX, ServerMessage, decode_message, encode_message},
   transport_layer::{read_message_from_stream, write_message_to_stream},
 };
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
@@ -199,6 +200,9 @@ async fn test_transport_layer_tcp_communication() {
       .await
       .unwrap();
 
+
+    writer.shutdown().await.unwrap();
+
     received_message
   });
 
@@ -209,6 +213,9 @@ async fn test_transport_layer_tcp_communication() {
     write_message_to_stream(&mut writer, &test_message)
       .await
       .unwrap();
+
+
+    writer.shutdown().await.unwrap();
 
     let mut buffer = vec![0u8; 4096];
     let response: ServerMessage = read_message_from_stream(&mut reader, &mut buffer)
@@ -298,6 +305,9 @@ async fn test_large_message_handling() {
     write_message_to_stream(&mut writer, &test_message)
       .await
       .unwrap();
+
+
+    writer.shutdown().await.unwrap();
   });
 
   let (received_message, _) = tokio::join!(server_handle, client_handle);
@@ -374,4 +384,139 @@ async fn test_concurrent_message_transfer() {
 
   let received_messages = server_handle.await.unwrap();
   assert_eq!(received_messages.len(), num_clients * messages_per_client);
+}
+
+#[tokio::test]
+async fn test_message_cache_integration() {
+  use chat_core::message_cahce::MessageCache;
+
+  let cache = MessageCache::new(5);
+  let test_messages = [
+    ClientMessage::Join {
+      username: "user1".to_string(),
+    },
+    ClientMessage::Message {
+      username: "user1".to_string(),
+      content: "Hello".to_string(),
+    },
+    ClientMessage::Leave {
+      username: "user1".to_string(),
+    },
+  ];
+
+
+  for message in test_messages.iter() {
+    let hash = MessageCache::hash_message(message).unwrap();
+
+
+    assert!(cache.get(hash).await.is_none());
+
+
+    let encoded = encode_message(message).unwrap();
+    cache.put(hash, encoded.clone()).await;
+
+
+    let cached = cache.get(hash).await;
+    assert!(cached.is_some());
+    assert_eq!(cached.unwrap(), encoded);
+  }
+}
+
+#[tokio::test]
+async fn test_error_propagation_integration() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+
+  let server_handle = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.unwrap();
+    let (mut reader, _) = stream.into_split();
+
+    let mut buffer = vec![0u8; 4096];
+    let result: Result<ClientMessage, ApplicationError> =
+      read_message_from_stream(&mut reader, &mut buffer).await;
+
+
+    match result {
+      Ok(_) => {
+
+        println!("Unexpectedly received valid message from malformed data");
+      }
+      Err(ApplicationError::Decoding(_)) => {
+
+      }
+      Err(ApplicationError::Encoding(_)) => {
+
+      }
+      Err(ApplicationError::StreamIoError(_)) => {
+
+      }
+      Err(e) => {
+
+        println!("Got unexpected error: {:?}", e);
+      }
+    }
+  });
+
+  let client_handle = tokio::spawn(async move {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (_, mut writer) = stream.into_split();
+
+
+    let malformed_data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF];
+    let _ = writer.write_all(&malformed_data).await;
+
+
+    let _ = writer.shutdown().await;
+  });
+
+  server_handle.await.unwrap();
+  client_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_message_size_limits_integration() {
+
+  let huge_content = "x".repeat(10_000);
+  let test_message = ClientMessage::Message {
+    username: "biguser".to_string(),
+    content: huge_content.clone(),
+  };
+
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+
+  let server_handle = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.unwrap();
+    let (mut reader, _) = stream.into_split();
+
+    let mut buffer = vec![0u8; 15_000];
+    let received_message: ClientMessage = read_message_from_stream(&mut reader, &mut buffer)
+      .await
+      .unwrap();
+
+    received_message
+  });
+
+  let client_handle = tokio::spawn(async move {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (_, mut writer) = stream.into_split();
+
+    write_message_to_stream(&mut writer, &test_message)
+      .await
+      .unwrap();
+
+
+    writer.shutdown().await.unwrap();
+  });
+
+  let (received_message, _) = tokio::join!(server_handle, client_handle);
+
+  match received_message.unwrap() {
+    ClientMessage::Message { username, content } => {
+      assert_eq!(username, "biguser");
+      assert_eq!(content.len(), 10_000);
+      assert_eq!(content, huge_content);
+    }
+    _ => panic!("Expected large ClientMessage::Message"),
+  }
 }

@@ -6,7 +6,10 @@ use tokio::{
 
 use crate::{
   error::ApplicationError,
-  protocol::{LENGTH_PREFIX, decode_message, encode_message},
+  message_cahce::MessageCache,
+  protocol::{
+    LENGTH_PREFIX, MAX_MESSAGE_SIZE, decode_message, encode_message, encode_message_with_cache,
+  },
 };
 
 pub async fn read_message_from_stream<T: Decode<()>>(
@@ -24,12 +27,30 @@ pub async fn read_message_from_stream<T: Decode<()>>(
 
   let length = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
 
+  if length > MAX_MESSAGE_SIZE {
+    return Err(ApplicationError::message_too_large(
+      length,
+      MAX_MESSAGE_SIZE,
+    ));
+  }
+
   if buffer.len() < length {
     buffer.resize(length, 0);
   }
 
   reader.read_exact(&mut buffer[..length]).await?;
-  Ok(decode_message(&buffer[..length])?)
+  decode_message(&buffer[..length])
+}
+
+pub async fn write_message_to_stream_with_cache<T: Encode>(
+  writer: &mut tokio::net::tcp::OwnedWriteHalf,
+  message: &T,
+  cache: &MessageCache,
+) -> Result<(), ApplicationError> {
+  let frame = encode_message_with_cache(message, cache).await?;
+  writer.write_all(&frame).await?;
+  writer.flush().await?;
+  Ok(())
 }
 
 pub async fn write_message_to_stream<T: Encode>(
@@ -56,9 +77,10 @@ mod tests {
     let test_message = crate::protocol::ClientMessage::Join {
       username: "testuser".to_string(),
     };
-
-    let encoded_message =
-      crate::protocol::encode_message(&test_message).expect("Failed to encode test message");
+    let cache = MessageCache::new(1);
+    let encoded_message = crate::protocol::encode_message_with_cache(&test_message, &cache)
+      .await
+      .expect("Failed to encode test message");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

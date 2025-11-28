@@ -1,27 +1,30 @@
 use chat_core::{
   error::ApplicationError,
-  protocol::{ServerMessage, encode_message},
+  message_cahce::MessageCache,
+  protocol::{ServerMessage, SharedServerMessage},
+  transport_layer::{write_message_to_stream, write_message_to_stream_with_cache},
 };
 use tokio::{
-  io::AsyncWriteExt,
   net::tcp::OwnedWriteHalf,
   sync::broadcast::{Receiver, error::RecvError},
   task::JoinHandle,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 pub fn spawn_broadcast_dispatcher(
-  mut rec: Receiver<ServerMessage>,
+  mut rec: Receiver<SharedServerMessage>,
   channel_owner: String,
   mut writer: OwnedWriteHalf,
+  cache: MessageCache,
 ) -> JoinHandle<Result<(), ApplicationError>> {
   tokio::spawn(async move {
     let success_msg = ServerMessage::Success {
       message: format!("Welcome to the chat 🙏 `{}`", channel_owner),
     };
-    let frame = encode_message(&success_msg)?;
+    write_message_to_stream(&mut writer, &success_msg).await?;
 
-    writer.write_all(&frame).await?;
+    info!("User {} joined the chat", channel_owner);
+
     loop {
       match rec.recv().await {
         Ok(message) => {
@@ -31,28 +34,7 @@ pub fn spawn_broadcast_dispatcher(
             continue;
           }
 
-          match message {
-            ServerMessage::Message { username, content } => {
-              let frame = encode_message(&ServerMessage::Message { username, content })?;
-              writer.write_all(&frame).await?;
-            }
-            ServerMessage::Error { reason } => {
-              let frame = encode_message(&ServerMessage::Error { reason })?;
-              writer.write_all(&frame).await?;
-            }
-            ServerMessage::Success { message } => {
-              let frame = encode_message(&ServerMessage::Success { message })?;
-              writer.write_all(&frame).await?;
-            }
-            ServerMessage::UserJoined { username } => {
-              let frame = encode_message(&ServerMessage::UserJoined { username })?;
-              writer.write_all(&frame).await?;
-            }
-            ServerMessage::UserLeft { username } => {
-              let frame = encode_message(&ServerMessage::UserLeft { username })?;
-              writer.write_all(&frame).await?;
-            }
-          }
+          write_message_to_stream_with_cache(&mut writer, &message, &cache).await?;
         }
         Err(RecvError::Lagged(lagged_by)) => {
           warn!("reciever lagged by {lagged_by} messages");
@@ -64,11 +46,9 @@ pub fn spawn_broadcast_dispatcher(
       }
     }
 
-    let success_msg = ServerMessage::Success {
-      message: format!("Disconnected: Good bye `{}`!", channel_owner),
-    };
-    let frame = encode_message(&success_msg)?;
-    writer.write_all(&frame).await?;
+    let success_msg =
+      ServerMessage::success(format!("Disconnected: Good bye `{}`!", channel_owner));
+    write_message_to_stream(&mut writer, &success_msg).await?;
     Ok(())
   })
 }
@@ -76,7 +56,8 @@ pub fn spawn_broadcast_dispatcher(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use tokio::sync::broadcast;
+  use chat_core::protocol::encode_message;
+use tokio::sync::broadcast;
 
   #[test]
   fn test_message_username_extraction() {

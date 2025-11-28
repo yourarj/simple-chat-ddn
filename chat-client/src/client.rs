@@ -1,7 +1,5 @@
 use anyhow::{Result, anyhow};
-use chat_core::protocol::{
-  ClientMessage, LENGTH_PREFIX, ServerMessage, decode_message, encode_message,
-};
+use chat_core::protocol::{ClientMessage, ServerMessage, encode_message};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -11,8 +9,10 @@ use tracing::{error, info, warn};
 
 pub struct ChatClient {
   username: String,
+  original_username: String,
   reader: BufReader<OwnedReadHalf>,
   writer: OwnedWriteHalf,
+  join_attempts: u8,
 }
 
 impl ChatClient {
@@ -26,9 +26,11 @@ impl ChatClient {
       reader: BufReader::new(reader),
       writer,
       username: username.to_string(),
+      original_username: username.to_string(),
+      join_attempts: 0,
     };
 
-    client.join().await?;
+    client.join_with_retry().await?;
 
     Ok(client)
   }
@@ -67,7 +69,7 @@ impl ChatClient {
                       break;
                   }
                   Ok(n) => {
-                      if let Err(e) = self.handle_server_message(&buffer[..n]).await {
+                      if let Err(e) = crate::message_handler::handle_server_message(&buffer[..n]).await {
                           error!("Error handling server message: {}", e);
                       }
                   }
@@ -131,43 +133,13 @@ impl ChatClient {
     Ok(())
   }
 
-  async fn handle_server_message(&self, data: &[u8]) -> Result<()> {
-    if data.len() < LENGTH_PREFIX {
-      return Err(anyhow!("Message too short"));
-    }
-
-    let length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    if data.len() < LENGTH_PREFIX + length {
-      return Err(anyhow!("Incomplete message"));
-    }
-
-    let message = decode_message(&data[LENGTH_PREFIX..LENGTH_PREFIX + length])
-      .map_err(|e| anyhow!("Failed to decode server message: {}", e))?;
-
-    match message {
-      ServerMessage::Message { username, content } => {
-        println!("🗨️: {}: {}", username, content);
-      }
-      ServerMessage::Error { reason } => {
-        println!("❌: {}", reason);
-      }
-      ServerMessage::Success { message } => {
-        println!("💐: {}", message);
-      }
-      ServerMessage::UserJoined { username } => {
-        println!("📢: `{}` joined the chat", username);
-      }
-      ServerMessage::UserLeft { username } => {
-        println!("📢: `{}` left the chat", username);
-      }
-    }
-    Ok(())
-  }
-
   async fn handle_user_input(&mut self, input: &str) -> Result<()> {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
 
     match parts[0] {
+      "send" if parts.len() == 1 => {
+        println!("No message provided. Use 'send <message>'");
+      }
       "send" if parts.len() > 1 => {
         info!("User {} sending message: {}", self.username, parts[1]);
         let message = ClientMessage::Message {
@@ -190,14 +162,6 @@ impl ChatClient {
       }
     }
 
-    Ok(())
-  }
-
-  async fn join(&mut self) -> Result<()> {
-    let message = ClientMessage::Join {
-      username: self.username.clone(),
-    };
-    self.send_client_message(message).await?;
     Ok(())
   }
 
@@ -227,6 +191,74 @@ impl ChatClient {
     }
 
     Ok(())
+  }
+
+  /// Join the chat with retry
+  async fn join_with_retry(&mut self) -> Result<()> {
+    const MAX_JOIN_ATTEMPTS: u8 = 3;
+
+    loop {
+      self.join_attempts += 1;
+
+      info!(
+        "Attempting to join with username: {} (attempt {}/{})",
+        self.username, self.join_attempts, MAX_JOIN_ATTEMPTS
+      );
+
+      let message = ClientMessage::Join {
+        username: self.username.clone(),
+      };
+      self.send_client_message(message).await?;
+
+      let mut buffer = vec![0u8; 4096];
+
+      let reader = self.reader.get_mut();
+      match chat_core::transport_layer::read_message_from_stream(reader, &mut buffer).await {
+        Ok(ServerMessage::Success { message }) => {
+          info!("Successfully joined chat: {}", message);
+          println!("✅ {}", message);
+          return Ok(());
+        }
+        Ok(ServerMessage::UserNameAlreadyTaken { username }) => {
+          warn!("username '{}' is already taken", username);
+
+          if self.join_attempts >= MAX_JOIN_ATTEMPTS {
+            return Err(anyhow!(
+              "Failed to join after {} attempts. username '{}' is taken and no alternatives were accepted.",
+              MAX_JOIN_ATTEMPTS,
+              username
+            ));
+          }
+
+          let suggested_username = crate::username_handler::generate_alternative_username(
+            &self.username,
+            self.join_attempts,
+          );
+          match crate::username_handler::prompt_username_selection_loop(
+            &self.original_username,
+            &suggested_username,
+          )
+          .await?
+          {
+            Some(new_username) => {
+              self.username = new_username;
+            }
+            None => {
+              return Err(anyhow!("User cancelled join process"));
+            }
+          }
+        }
+        Ok(ServerMessage::Error { reason }) => {
+          return Err(anyhow!("Server error during join: {}", reason));
+        }
+        Ok(_) => {
+          return Err(anyhow!("Unexpected server response during join process"));
+        }
+        Err(e) => {
+          return Err(anyhow!("Application error: {}", e));
+        }
+      }
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chat_client::client::ChatClient;
+use chat_core::utils::validate_username;
 use clap::Parser;
 use tracing::Level;
 
@@ -24,6 +25,7 @@ async fn main() -> Result<()> {
 
   let args = Args::parse();
 
+  validate_username(&args.username)?;
   let mut client = ChatClient::new(&args.host, args.port, &args.username).await?;
   client.run().await?;
 
