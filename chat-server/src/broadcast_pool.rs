@@ -1,116 +1,140 @@
-use std::{collections::HashMap, sync::Arc};
-
 use chat_core::{
-  error::ApplicationError, message_cahce::MessageCache, protocol::SharedServerMessage,
+  error::Result,
+  message_cache::MessageCache,
+  protocol::{SharedServerMessage, UserMessageCounter},
 };
 use dashmap::DashMap;
-use tokio::{net::tcp::OwnedWriteHalf, sync::broadcast::Sender, task::JoinHandle};
-use tracing::warn;
+use std::sync::Arc;
+use tokio::{net::tcp::OwnedWriteHalf, task::JoinHandle};
+use tracing::{debug, info, warn};
 
+#[derive(Clone)]
 pub struct BroadcastPool {
-  broadcaster: Arc<Sender<SharedServerMessage>>,
-  dispatchers: Arc<DashMap<String, JoinHandle<Result<(), ApplicationError>>>>,
+  broadcaster: Arc<tokio::sync::broadcast::Sender<SharedServerMessage>>,
+  dispatchers: Arc<DashMap<String, JoinHandle<()>>>,
+  counters: Arc<DashMap<String, Arc<UserMessageCounter>>>,
 }
 
 impl BroadcastPool {
-  pub fn new(broadcaster: Arc<Sender<SharedServerMessage>>) -> Self {
+  pub fn new(broadcaster: Arc<tokio::sync::broadcast::Sender<SharedServerMessage>>) -> Self {
     Self {
       broadcaster,
       dispatchers: Arc::new(DashMap::new()),
+      counters: Arc::new(DashMap::new()),
     }
   }
 
+  /// Create a new broadcast dispatcher for a user
   pub fn create_dispatcher(&self, username: String, writer: OwnedWriteHalf, cache: MessageCache) {
+    // Create per-user message counter
+    let counter = Arc::new(UserMessageCounter::new(username.clone()));
+    self.counters.insert(username.clone(), Arc::clone(&counter));
+
     let receiver = self.broadcaster.subscribe();
-    let dispatcher =
-      crate::broadcast::spawn_broadcast_dispatcher(receiver, username.clone(), writer, cache);
-    self.dispatchers.insert(username, dispatcher);
+    let dispatcher = crate::broadcast::spawn_broadcast_dispatcher(
+      receiver,
+      username.clone(),
+      writer,
+      cache,
+      counter,
+    );
+
+    if let Some(old_handle) = self.dispatchers.insert(username.clone(), dispatcher) {
+      warn!("Replaced existing dispatcher for user: {}", username);
+      old_handle.abort();
+    }
+
+    debug!("Created dispatcher and counter for user: {}", username);
   }
 
+  /// Check if user has an active dispatcher
   pub fn has(&self, username: &str) -> bool {
     self.dispatchers.contains_key(username)
   }
 
+  /// Get user's message counter
+  pub fn get_counter(&self, username: &str) -> Option<Arc<UserMessageCounter>> {
+    self
+      .counters
+      .get(username)
+      .map(|entry| Arc::clone(entry.value()))
+  }
+
+  /// Destroy a user's dispatcher and counter
   pub fn destroy_dispatcher(&self, username: &str) {
-    if let Some((_, dispatcher)) = self.dispatchers.remove(username) {
-      dispatcher.abort();
-    } else {
-      warn!("dispatcher not found for user {username}");
-    }
-  }
-
-  pub async fn broadcast_message(
-    &self,
-    message: SharedServerMessage,
-  ) -> Result<(), ApplicationError> {
-    if self.broadcaster.send(message).is_err() {
-      warn!("no recievers to recive broadcst");
-    }
-    Ok(())
-  }
-
-  pub async fn shutdown(&self) -> Result<(), ApplicationError> {
-    drop(self.broadcaster.clone());
-
-    let mut dispatchers = HashMap::new();
-    for entry in self.dispatchers.iter() {
-      if let Some((username, dispatcher)) = self.dispatchers.remove(entry.key()) {
-        dispatchers.insert(username, dispatcher);
+    match self.dispatchers.remove(username) {
+      Some((_, dispatcher)) => {
+        dispatcher.abort();
+        debug!("Dispatcher destroyed for user: {}", username);
+      }
+      None => {
+        debug!("No dispatcher found for user: {}", username);
       }
     }
 
-    for (_, dispatcher) in dispatchers {
-      dispatcher.abort();
+    // Remove counter
+    if let Some((_, counter)) = self.counters.remove(username) {
+      info!(
+        "User '{}' sent {} total messages",
+        username,
+        counter.current_count()
+      );
     }
-    Ok(())
   }
-}
 
-impl Clone for BroadcastPool {
-  fn clone(&self) -> Self {
-    Self {
-      broadcaster: Arc::clone(&self.broadcaster),
-      dispatchers: Arc::clone(&self.dispatchers),
+  /// Broadcast message to all connected users
+  pub async fn broadcast_message(&self, message: SharedServerMessage) -> Result<()> {
+    match self.broadcaster.send(message) {
+      Ok(receiver_count) => {
+        debug!("Message broadcast to {} receivers", receiver_count);
+        Ok(())
+      }
+      Err(_) => {
+        debug!("No active receivers for broadcast");
+        Ok(())
+      }
     }
+  }
+
+  /// Shutdown all dispatchers
+  pub async fn shutdown(&self) -> Result<()> {
+    let usernames: Vec<String> = self
+      .dispatchers
+      .iter()
+      .map(|entry| entry.key().clone())
+      .collect();
+
+    debug!("Shutting down {} dispatchers", usernames.len());
+
+    for username in usernames {
+      self.destroy_dispatcher(&username);
+    }
+
+    debug!("All dispatchers shut down");
+    Ok(())
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use tokio::sync::broadcast;
 
   #[test]
-  fn test_broadcast_pool_new() {
-    let (tx, _) = broadcast::channel(10);
-    let broadcaster = Arc::new(tx);
-    let pool = BroadcastPool::new(broadcaster.clone());
+  fn test_counter_storage() {
+    let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    let pool = BroadcastPool::new(Arc::new(tx));
 
-    assert!(Arc::ptr_eq(&pool.broadcaster, &broadcaster));
+    let counter = Arc::new(UserMessageCounter::new("alice".to_string()));
+    pool.counters.insert("alice".to_string(), counter);
+
+    assert!(pool.get_counter("alice").is_some());
+    assert!(pool.get_counter("bob").is_none());
   }
 
   #[test]
-  fn test_broadcast_pool_has() {
-    let (tx, _) = broadcast::channel(10);
+  fn test_has_user() {
+    let (tx, _rx) = tokio::sync::broadcast::channel(100);
     let pool = BroadcastPool::new(Arc::new(tx));
-
-    assert!(!pool.has("testuser"));
-  }
-
-  #[test]
-  fn test_broadcast_pool_destroy_dispatcher() {
-    let (tx, _) = broadcast::channel(10);
-    let pool = BroadcastPool::new(Arc::new(tx));
-
-    pool.destroy_dispatcher("nonexistent");
-  }
-
-  #[tokio::test]
-  async fn test_broadcast_pool_shutdown() {
-    let (tx, _) = broadcast::channel(10);
-    let pool = BroadcastPool::new(Arc::new(tx));
-
-    let result = pool.shutdown().await;
-    assert!(result.is_ok());
+    assert!(!pool.has("alice"));
   }
 }

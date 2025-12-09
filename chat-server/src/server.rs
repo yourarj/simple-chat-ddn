@@ -1,77 +1,116 @@
-use anyhow::Result;
-use chat_core::message_cahce::MessageCache;
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::sync::{
-  broadcast::{self},
-  oneshot,
+use chat_core::{
+  error::{ApplicationError, Result},
+  message_cache::MessageCache,
+  protocol::SharedServerMessage,
 };
-use tracing::{error, info};
+use std::sync::Arc;
+use tokio::{
+  net::TcpListener,
+  sync::{Semaphore, broadcast},
+};
+use tracing::{debug, info, warn};
 
-use crate::broadcast_pool::BroadcastPool;
+use crate::{broadcast_pool::BroadcastPool, client_handler::handle_client};
+
+pub type ShutdownSignal = tokio::sync::oneshot::Receiver<()>;
 
 pub struct ChatServer {
-  max_connections: usize,
   broadcast_pool: BroadcastPool,
   cache: MessageCache,
+  max_connections: usize,
 }
 
-pub type ShutdownSignal = oneshot::Receiver<()>;
-
 impl ChatServer {
-  pub fn new(max_connections: usize) -> Self {
-    let (tx, _) = broadcast::channel(10_000);
+  pub fn new(max_connections: usize, cache_capacity: usize, broadcast_capacity: usize) -> Self {
+    let (tx, _rx) = broadcast::channel::<SharedServerMessage>(broadcast_capacity);
+    let broadcaster = Arc::new(tx);
+    let broadcast_pool = BroadcastPool::new(broadcaster);
+    let cache = MessageCache::new(cache_capacity);
+
     Self {
-      broadcast_pool: BroadcastPool::new(Arc::new(tx)),
-      cache: MessageCache::new(10_0000),
+      broadcast_pool,
+      cache,
       max_connections,
     }
   }
 
   pub async fn run(&self, host: &str, port: u16, mut shutdown_rx: ShutdownSignal) -> Result<()> {
-    let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-    info!("Chat server listening on {}:{}", host, port);
+    let addr = format!("{}:{}", host, port);
+    let listener = match TcpListener::bind(&addr).await {
+      Ok(l) => l,
+      Err(e) => {
+        return Err(ApplicationError::Io(e));
+      }
+    };
 
-    let connection_limiter = Arc::new(tokio::sync::Semaphore::new(self.max_connections));
+    info!("Chat server listening on {}", addr);
+    info!(
+      "Configuration: max_connections={}, cache_capacity={}",
+      self.max_connections,
+      self.cache.capacity()
+    );
+
+    let limiter = Arc::new(Semaphore::new(self.max_connections));
+    let mut connection_count: usize = 0;
 
     loop {
       tokio::select! {
-        _ = &mut shutdown_rx => {
-          info!("Shutdown signal received, starting graceful shutdown...");
-          self.shutdown().await?;
-          return Ok(());
-        }
-        accept_result = listener.accept() => {
-          match accept_result {
-            Ok((stream, addr)) => {
-              info!("New connection from {}", addr);
-              let permit = connection_limiter.clone().acquire_owned().await?;
-
-              let pool = self.broadcast_pool.clone();
-              let cache = self.cache.clone();
-              tokio::spawn(async move {
-                if let Err(e) = crate::client_handler::handle_client(stream, pool, cache).await {
-                  error!("Client handler error: {}", e);
-                }
-                drop(permit);
-              });
-            }
-            Err(e) => {
-              error!("Accept error: {}", e);
-              tracing::debug!("Accept failed, releasing permit");
-            }
+          _ = &mut shutdown_rx => {
+              info!("Shutdown signal received");
+              self.shutdown().await?;
+              info!("Total connections served: {}", connection_count);
+              return Ok(());
           }
-        }
+
+          accept_result = listener.accept() => {
+              match accept_result {
+                  Ok((stream, addr)) => {
+                      // Try non-blocking acquire for immediate rejection
+                      match limiter.clone().try_acquire_owned() {
+                          Ok(permit) => {
+                              debug!("Client connected from: {} (active: {})",
+                                     addr, self.max_connections - limiter.available_permits());
+
+                              connection_count = connection_count.saturating_add(1);
+
+                              let pool = self.broadcast_pool.clone();
+                              let cache = self.cache.clone();
+
+                              tokio::spawn(async move {
+                                  match handle_client(stream, pool, cache).await {
+                                      Ok(()) => {
+                                          debug!("Client {} disconnected cleanly", addr);
+                                      }
+                                      Err(e) => {
+                                          debug!("Client {} error: {}", addr, e);
+                                      }
+                                  }
+                                  drop(permit); // Release connection slot
+                              });
+                          }
+                          Err(_) => {
+                              warn!(
+                                  "Max connections ({}) reached, rejecting connection from {}",
+                                  self.max_connections, addr
+                              );
+                              // Stream drops here, closing connection
+                          }
+                      }
+                  }
+                  Err(e) => {
+                      warn!("Failed to accept connection: {}", e);
+                      // Continue accepting other connections
+                  }
+              }
+          }
       }
     }
   }
 
-  async fn shutdown(&self) -> Result<()> {
-    info!("Starting graceful shutdown...");
+  pub async fn shutdown(&self) -> Result<()> {
+    info!("Shutting down chat server...");
     self.broadcast_pool.shutdown().await?;
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    info!("Server shutdown complete");
+    info!("Broadcast pool shutdown complete");
     Ok(())
   }
 }
@@ -79,116 +118,18 @@ impl ChatServer {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use chat_core::{error::ApplicationError, protocol::ServerMessage};
 
-  #[tokio::test]
-  async fn test_server_creation() {
-    let server = ChatServer::new(100);
-    assert_eq!(server.max_connections, 100);
+  #[test]
+  fn test_server_creation() {
+    let server = ChatServer::new(1000, 10_000, 50_000);
+    assert_eq!(server.max_connections, 1000);
+    assert_eq!(server.cache.capacity(), 10_000);
   }
 
   #[tokio::test]
-  async fn test_server_creation_with_zero_connections() {
-    let server = ChatServer::new(0);
-    assert_eq!(server.max_connections, 0);
-  }
-
-  #[tokio::test]
-  async fn test_graceful_shutdown() {
-    let server = ChatServer::new(10);
-
+  async fn test_server_shutdown() {
+    let server = ChatServer::new(100, 1000, 10_000);
     let result = server.shutdown().await;
     assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_application_error_variants() {
-    let errors = vec![
-      ApplicationError::ClientReadStreamClosed,
-      ApplicationError::IncompleteLengthPrefix,
-      ApplicationError::IncompletePyaload,
-      ApplicationError::UsernameNotFound,
-    ];
-
-    for error in errors {
-      let error_string = format!("{}", error);
-      assert!(!error_string.is_empty(), "Error should have a description");
-
-      let _debug_string = format!("{:?}", error);
-    }
-  }
-
-  #[tokio::test]
-  async fn test_multiple_server_instances() {
-    let server1 = ChatServer::new(50);
-    let server2 = ChatServer::new(100);
-
-    assert_eq!(server1.max_connections, 50);
-    assert_eq!(server2.max_connections, 100);
-  }
-
-  #[test]
-  fn test_connection_limiter_creation() {
-    let server = ChatServer::new(10);
-
-    let connection_limiter = tokio::sync::Semaphore::new(server.max_connections);
-    assert_eq!(connection_limiter.available_permits(), 10);
-
-    let permit1 = connection_limiter.try_acquire().unwrap();
-    assert_eq!(connection_limiter.available_permits(), 9);
-
-    let permit2 = connection_limiter.try_acquire().unwrap();
-    assert_eq!(connection_limiter.available_permits(), 8);
-
-    drop(permit1);
-    drop(permit2);
-
-    assert_eq!(connection_limiter.available_permits(), 10);
-  }
-
-  #[test]
-  fn test_large_server_capacity() {
-    let server = ChatServer::new(1_000_000);
-    assert_eq!(server.max_connections, 1_000_000);
-  }
-
-  #[test]
-  fn test_server_message_username_extraction_comprehensive() {
-    let messages_with_usernames = vec![
-      ServerMessage::Message {
-        username: "alice".to_string(),
-        content: "Hello".to_string(),
-      },
-      ServerMessage::UserJoined {
-        username: "bob".to_string(),
-      },
-      ServerMessage::UserLeft {
-        username: "charlie".to_string(),
-      },
-    ];
-
-    let messages_without_usernames = vec![
-      ServerMessage::Success {
-        message: "Welcome!".to_string(),
-      },
-      ServerMessage::Error {
-        reason: "Error occurred".to_string(),
-      },
-    ];
-
-    for message in &messages_with_usernames {
-      assert!(message.username().is_some(), "Message should have username");
-      assert!(
-        !message.username().unwrap().is_empty(),
-        "Username should not be empty"
-      );
-    }
-
-    for message in &messages_without_usernames {
-      assert!(
-        message.username().is_none(),
-        "Message should not have username"
-      );
-    }
   }
 }

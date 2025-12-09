@@ -4,11 +4,29 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "chat-server"
+path = "src/main.rs"
+
 [dependencies]
 chat-core = { path = "../chat-core" }
-dashmap = { workspace = true }
-anyhow = { workspace = true }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap = { workspace = true, features = ["derive"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tokio = { workspace = true }
+anyhow.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"
+bincode = "2.0"    # For test helpers
+
+# Integration tests
+[[test]]
+name = "server_test"
+path = "tests/server_test.rs"
+
+[[test]]
+name = "stress_test"
+path = "tests/stress_test.rs"

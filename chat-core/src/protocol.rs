@@ -1,138 +1,277 @@
-use std::{ops::Deref, sync::Arc};
+use bincode::{Decode, Encode};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::debug;
 
-use bincode::{self, Decode, Encode, config::Configuration};
-use bytes::{Bytes, BytesMut};
+use crate::error::{ApplicationError, Result};
+use crate::message_cache::MessageCache;
 
-use crate::{error::ApplicationError, message_cahce::MessageCache};
-
-pub const BINCODE_STANDADRD_CONFIG: Configuration = bincode::config::standard();
-/// max allowed message size 1 Mibibyte
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-/// max allowed username length
 pub const MAX_USERNAME_LENGTH: usize = 30;
+pub const LENGTH_PREFIX: usize = 4;
 
-#[derive(Clone, Encode, Decode)]
+const BINCODE_STANDARD_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
+#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
 pub enum ClientMessage {
   Join { username: String },
   Leave { username: String },
   Message { username: String, content: String },
 }
 
-impl ClientMessage {
-  pub fn username(&self) -> Option<&str> {
-    match self {
-      ClientMessage::Join { username, .. }
-      | ClientMessage::Leave { username }
-      | ClientMessage::Message {
-        username,
-        content: _,
-      } => Some(username),
-    }
-  }
-  pub fn join(username: String) -> Self {
-    Self::Join { username }
-  }
-  pub fn leave(username: String) -> Self {
-    Self::Leave { username }
-  }
-  pub fn message(username: String, content: String) -> Self {
-    Self::Message { username, content }
-  }
-}
-
-#[derive(Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
 pub enum ServerMessage {
   Success { message: String },
   Error { reason: String },
-  UserNameAlreadyTaken { username: String },
   Message { username: String, content: String },
   UserJoined { username: String },
   UserLeft { username: String },
 }
 
 impl ServerMessage {
-  pub fn username(&self) -> Option<&str> {
-    match self {
-      ServerMessage::Message { username, .. }
-      | ServerMessage::UserNameAlreadyTaken { username }
-      | ServerMessage::UserJoined { username }
-      | ServerMessage::UserLeft { username } => Some(username),
-      _ => None,
-    }
-  }
   pub fn success(message: String) -> Self {
     Self::Success { message }
   }
+
   pub fn error(reason: String) -> Self {
     Self::Error { reason }
   }
+
   pub fn message(username: String, content: String) -> Self {
     Self::Message { username, content }
   }
-  pub fn user_name_already_taken(username: String) -> Self {
-    Self::UserNameAlreadyTaken { username }
-  }
+
   pub fn user_joined(username: String) -> Self {
     Self::UserJoined { username }
   }
+
   pub fn user_left(username: String) -> Self {
     Self::UserLeft { username }
   }
+
+  pub fn user_name_already_taken(username: String) -> Self {
+    Self::Error {
+      reason: format!("Username '{}' is already taken", username),
+    }
+  }
+
+  pub fn username(&self) -> Option<&str> {
+    match self {
+      Self::Message { username, .. }
+      | Self::UserJoined { username }
+      | Self::UserLeft { username } => Some(username),
+      _ => None,
+    }
+  }
 }
 
-#[derive(Encode, Decode)]
-pub struct SharedServerMessage(pub Arc<ServerMessage>);
+/// Message ID based on username hash + sequence counter
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageId {
+  username_hash: u64,
+  sequence: u64,
+}
+
+impl MessageId {
+  /// Create a new message ID from username and sequence
+  pub fn new(username: &str, sequence: u64) -> Self {
+    let mut hasher = DefaultHasher::new();
+    username.hash(&mut hasher);
+    let username_hash = hasher.finish();
+
+    Self {
+      username_hash,
+      sequence,
+    }
+  }
+
+  /// Convert to u64 for cache key (XOR for good distribution)
+  pub fn as_u64(&self) -> u64 {
+    self.username_hash ^ self.sequence
+  }
+
+  pub fn username_hash(&self) -> u64 {
+    self.username_hash
+  }
+
+  pub fn sequence(&self) -> u64 {
+    self.sequence
+  }
+}
+
+/// Per-user message counter
+#[derive(Debug)]
+pub struct UserMessageCounter {
+  username: String,
+  username_hash: u64,
+  counter: AtomicU64,
+}
+
+impl UserMessageCounter {
+  pub fn new(username: String) -> Self {
+    let mut hasher = DefaultHasher::new();
+    username.hash(&mut hasher);
+    let username_hash = hasher.finish();
+
+    Self {
+      username,
+      username_hash,
+      counter: AtomicU64::new(0),
+    }
+  }
+
+  /// Generate next message ID for this user
+  pub fn next_id(&self) -> MessageId {
+    let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+    MessageId {
+      username_hash: self.username_hash,
+      sequence,
+    }
+  }
+
+  pub fn username(&self) -> &str {
+    &self.username
+  }
+
+  pub fn current_count(&self) -> u64 {
+    self.counter.load(Ordering::Relaxed)
+  }
+}
+
+/// Shared server message with user-scoped ID
+#[derive(Debug, Clone)]
+pub struct SharedServerMessage {
+  inner: Arc<ServerMessage>,
+  id: MessageId,
+}
 
 impl SharedServerMessage {
-  pub fn new(message: ServerMessage) -> Self {
-    Self(Arc::new(message))
+  /// Create message with ID from user's counter
+  pub fn new_with_counter(message: ServerMessage, counter: &UserMessageCounter) -> Self {
+    let id = counter.next_id();
+    Self {
+      inner: Arc::new(message),
+      id,
+    }
+  }
+
+  /// Create message without counter (for system messages)
+  pub fn new_system(message: ServerMessage) -> Self {
+    static SYSTEM_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = SYSTEM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let id = MessageId::new("system", sequence);
+
+    Self {
+      inner: Arc::new(message),
+      id,
+    }
+  }
+
+  pub fn get(&self) -> &ServerMessage {
+    &self.inner
+  }
+
+  pub fn id(&self) -> MessageId {
+    self.id
+  }
+
+  pub fn cache_key(&self) -> u64 {
+    self.id.as_u64()
+  }
+
+  pub fn username(&self) -> Option<&str> {
+    self.inner.username()
   }
 }
 
-impl Deref for SharedServerMessage {
-  type Target = ServerMessage;
+/// Encode message with optimized single allocation
+pub fn encode_message<T: Encode>(message: &T) -> Result<Bytes> {
+  let payload_vec = bincode::encode_to_vec(message, BINCODE_STANDARD_CONFIG)?;
+  let payload_len = payload_vec.len();
 
-  fn deref(&self) -> &Self::Target {
-    self.0.as_ref()
+  if payload_len > MAX_MESSAGE_SIZE {
+    return Err(ApplicationError::message_too_large(
+      payload_len,
+      MAX_MESSAGE_SIZE,
+    ));
   }
-}
 
-impl Clone for SharedServerMessage {
-  fn clone(&self) -> Self {
-    Self(Arc::clone(&self.0))
-  }
-}
+  let total_size = LENGTH_PREFIX
+    .checked_add(payload_len)
+    .ok_or_else(|| ApplicationError::invalid_frame("Frame size overflow".to_string()))?;
 
-pub const LENGTH_PREFIX: usize = 4;
+  let mut frame = BytesMut::with_capacity(total_size);
+  frame.put_u32(payload_len as u32);
+  frame.put_slice(&payload_vec);
 
-/// encode content which doesn't need to be cached
-pub fn encode_message<T: Encode>(message: &T) -> Result<Bytes, ApplicationError> {
-  let payload = Bytes::from(bincode::encode_to_vec(message, BINCODE_STANDADRD_CONFIG)?);
-  let mut frame = BytesMut::with_capacity(LENGTH_PREFIX + payload.len());
-  frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-  frame.extend_from_slice(&payload);
   Ok(frame.freeze())
 }
 
-/// encode content which needs to be fetched from cache
-/// this is userful specially for ServerMessages
-pub async fn encode_message_with_cache<T: Encode>(
-  message: &T,
+/// Encode message with cache - uses username-based message ID
+pub fn encode_message_with_cache(
+  message: &SharedServerMessage,
   cache: &MessageCache,
-) -> Result<Bytes, ApplicationError> {
-  let hash = MessageCache::hash_message(message)?;
+) -> Result<Bytes> {
+  let cache_key = message.cache_key();
 
-  if let Some(cached) = cache.get(hash).await {
+  // Try cache first
+  if let Some(cached) = cache.get(cache_key) {
+    debug!("Cache hit for message ID: {:?}", message.id());
     return Ok(cached);
   }
-  let frame_bytes = encode_message(message)?;
-  cache.put(hash, frame_bytes.clone()).await;
 
+  // Encode once on cache miss
+  let frame_bytes = encode_message(message.get())?;
+  cache.put(cache_key, frame_bytes.clone());
+
+  debug!(
+    "Cache miss, encoded and cached message ID: {:?}",
+    message.id()
+  );
   Ok(frame_bytes)
 }
 
-pub fn decode_message<T: Decode<()>>(buf: &[u8]) -> Result<T, ApplicationError> {
-  Ok(bincode::decode_from_slice(buf, BINCODE_STANDADRD_CONFIG).map(|(body, _)| body)?)
+pub fn decode_message<T: Decode<()>>(bytes: &[u8]) -> Result<T> {
+  let (decoded, _len) = bincode::decode_from_slice(bytes, BINCODE_STANDARD_CONFIG)?;
+  Ok(decoded)
+}
+
+pub fn read_frame(buffer: &mut impl Buf) -> Result<Option<Bytes>> {
+  if buffer.remaining() < LENGTH_PREFIX {
+    return Ok(None);
+  }
+
+  let mut length_bytes = [0u8; LENGTH_PREFIX];
+  let peek_buf = buffer.chunk();
+
+  if peek_buf.len() < LENGTH_PREFIX {
+    return Ok(None);
+  }
+
+  length_bytes.copy_from_slice(&peek_buf[..LENGTH_PREFIX]);
+  let payload_len = u32::from_be_bytes(length_bytes) as usize;
+
+  if payload_len > MAX_MESSAGE_SIZE {
+    return Err(ApplicationError::message_too_large(
+      payload_len,
+      MAX_MESSAGE_SIZE,
+    ));
+  }
+
+  let total_frame_size = LENGTH_PREFIX
+    .checked_add(payload_len)
+    .ok_or_else(|| ApplicationError::invalid_frame("Frame size overflow".to_string()))?;
+
+  if buffer.remaining() < total_frame_size {
+    return Ok(None);
+  }
+
+  buffer.advance(LENGTH_PREFIX);
+  let payload = buffer.copy_to_bytes(payload_len);
+  Ok(Some(payload))
 }
 
 #[cfg(test)]
@@ -140,497 +279,110 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_client_message_username_extraction_join() {
-    let msg = ClientMessage::Join {
-      username: "alice".to_string(),
-    };
-    assert_eq!(msg.username(), Some("alice"));
+  fn test_message_id_deterministic() {
+    let id1 = MessageId::new("alice", 5);
+    let id2 = MessageId::new("alice", 5);
+    assert_eq!(id1, id2);
+    assert_eq!(id1.as_u64(), id2.as_u64());
   }
 
   #[test]
-  fn test_client_message_username_extraction_leave() {
-    let msg = ClientMessage::Leave {
-      username: "bob".to_string(),
-    };
-    assert_eq!(msg.username(), Some("bob"));
+  fn test_message_id_different_users() {
+    let id1 = MessageId::new("alice", 1);
+    let id2 = MessageId::new("bob", 1);
+    assert_ne!(id1, id2);
+    assert_ne!(id1.as_u64(), id2.as_u64());
   }
 
   #[test]
-  fn test_client_message_username_extraction_message() {
-    let msg = ClientMessage::Message {
-      username: "charlie".to_string(),
-      content: "Hello, world!".to_string(),
-    };
-    assert_eq!(msg.username(), Some("charlie"));
+  fn test_message_id_different_sequence() {
+    let id1 = MessageId::new("alice", 1);
+    let id2 = MessageId::new("alice", 2);
+    assert_ne!(id1, id2);
+    assert_ne!(id1.as_u64(), id2.as_u64());
   }
 
   #[test]
-  fn test_server_message_username_extraction_message() {
-    let msg = ServerMessage::Message {
-      username: "alice".to_string(),
-      content: "Hi everyone!".to_string(),
-    };
-    assert_eq!(msg.username(), Some("alice"));
+  fn test_user_counter() {
+    let counter = UserMessageCounter::new("alice".to_string());
+    let id1 = counter.next_id();
+    let id2 = counter.next_id();
+    let id3 = counter.next_id();
+
+    assert_ne!(id1, id2);
+    assert_ne!(id2, id3);
+    assert_eq!(counter.current_count(), 3);
   }
 
   #[test]
-  fn test_server_message_username_extraction_user_joined() {
-    let msg = ServerMessage::UserJoined {
-      username: "bob".to_string(),
-    };
-    assert_eq!(msg.username(), Some("bob"));
-  }
+  fn test_concurrent_counter() {
+    use std::sync::Arc;
+    use std::thread;
 
-  #[test]
-  fn test_server_message_username_extraction_user_left() {
-    let msg = ServerMessage::UserLeft {
-      username: "charlie".to_string(),
-    };
-    assert_eq!(msg.username(), Some("charlie"));
-  }
+    let counter = Arc::new(UserMessageCounter::new("alice".to_string()));
+    let mut handles = vec![];
 
-  #[test]
-  fn test_server_message_username_extraction_success() {
-    let msg = ServerMessage::Success {
-      message: "Welcome to the chat!".to_string(),
-    };
-    assert_eq!(msg.username(), None);
-  }
-
-  #[test]
-  fn test_server_message_username_extraction_error() {
-    let msg = ServerMessage::Error {
-      reason: "Invalid username".to_string(),
-    };
-    assert_eq!(msg.username(), None);
-  }
-
-  #[tokio::test]
-  async fn test_client_message_serialization_and_deserialization() {
-    let join_msg = ClientMessage::Join {
-      username: "testuser".to_string(),
-    };
-    let cache = MessageCache::new(10);
-    let encoded = encode_message_with_cache(&join_msg, &cache)
-      .await
-      .expect("Failed to encode join message");
-    let decoded: ClientMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode join message");
-    assert!(matches!(decoded, ClientMessage::Join { .. }));
-    if let ClientMessage::Join { username } = decoded {
-      assert_eq!(username, "testuser");
-    }
-
-    let leave_msg = ClientMessage::Leave {
-      username: "testuser".to_string(),
-    };
-    let encoded = encode_message_with_cache(&leave_msg, &cache)
-      .await
-      .expect("Failed to encode leave message");
-    let decoded: ClientMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode leave message");
-    assert!(matches!(decoded, ClientMessage::Leave { .. }));
-    if let ClientMessage::Leave { username } = decoded {
-      assert_eq!(username, "testuser");
-    }
-
-    let message_content = "Hello, this is a test message!";
-    let message_msg = ClientMessage::Message {
-      username: "testuser".to_string(),
-      content: message_content.to_string(),
-    };
-    let encoded = encode_message_with_cache(&message_msg, &cache)
-      .await
-      .expect("Failed to encode message");
-    let decoded: ClientMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode message");
-    assert!(matches!(decoded, ClientMessage::Message { .. }));
-    if let ClientMessage::Message { username, content } = decoded {
-      assert_eq!(username, "testuser");
-      assert_eq!(content, message_content);
-    }
-  }
-
-  #[tokio::test]
-  async fn test_server_message_serialization_and_deserialization() {
-    let success_msg = ServerMessage::Success {
-      message: "Connection successful!".to_string(),
-    };
-    let cache = MessageCache::new(10);
-    let encoded = encode_message_with_cache(&success_msg, &cache)
-      .await
-      .expect("Failed to encode success message");
-    let decoded: ServerMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode success message");
-    assert!(matches!(decoded, ServerMessage::Success { .. }));
-    if let ServerMessage::Success { message } = decoded {
-      assert_eq!(message, "Connection successful!");
-    }
-
-    let error_msg = ServerMessage::Error {
-      reason: "Username already taken".to_string(),
-    };
-    let encoded = encode_message_with_cache(&error_msg, &cache)
-      .await
-      .expect("Failed to encode error message");
-    let decoded: ServerMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode error message");
-    assert!(matches!(decoded, ServerMessage::Error { .. }));
-    if let ServerMessage::Error { reason } = decoded {
-      assert_eq!(reason, "Username already taken");
-    }
-
-    let server_message = ServerMessage::Message {
-      username: "alice".to_string(),
-      content: "Hello from server!".to_string(),
-    };
-    let encoded = encode_message_with_cache(&server_message, &cache)
-      .await
-      .expect("Failed to encode server message");
-    let decoded: ServerMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode server message");
-    assert!(matches!(decoded, ServerMessage::Message { .. }));
-    if let ServerMessage::Message { username, content } = decoded {
-      assert_eq!(username, "alice");
-      assert_eq!(content, "Hello from server!");
-    }
-
-    let user_joined_msg = ServerMessage::UserJoined {
-      username: "newuser".to_string(),
-    };
-    let encoded = encode_message_with_cache(&user_joined_msg, &cache)
-      .await
-      .expect("Failed to encode user joined message");
-    let decoded: ServerMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode user joined message");
-    assert!(matches!(decoded, ServerMessage::UserJoined { .. }));
-    if let ServerMessage::UserJoined { username } = decoded {
-      assert_eq!(username, "newuser");
-    }
-
-    let user_left_msg = ServerMessage::UserLeft {
-      username: "leavinguser".to_string(),
-    };
-    let encoded = encode_message_with_cache(&user_left_msg, &cache)
-      .await
-      .expect("Failed to encode user left message");
-    let decoded: ServerMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode user left message");
-    assert!(matches!(decoded, ServerMessage::UserLeft { .. }));
-    if let ServerMessage::UserLeft { username } = decoded {
-      assert_eq!(username, "leavinguser");
-    }
-  }
-
-  #[tokio::test]
-  async fn test_message_framing_length_prefix() {
-    let msg = ClientMessage::Join {
-      username: "test".to_string(),
-    };
-    let cache = MessageCache::new(10);
-
-    let frame = encode_message_with_cache(&msg, &cache)
-      .await
-      .expect("Failed to encode message");
-
-    assert!(
-      frame.len() > LENGTH_PREFIX,
-      "Frame should be longer than length prefix"
-    );
-
-    let length_bytes = &frame[0..LENGTH_PREFIX];
-    let length = u32::from_be_bytes([
-      length_bytes[0],
-      length_bytes[1],
-      length_bytes[2],
-      length_bytes[3],
-    ]) as usize;
-
-    assert_eq!(length, frame.len() - LENGTH_PREFIX);
-
-    let payload = &frame[LENGTH_PREFIX..];
-    let decoded: ClientMessage = decode_message(payload).expect("Failed to decode payload");
-    assert!(matches!(decoded, ClientMessage::Join { .. }));
-  }
-
-  #[tokio::test]
-  async fn test_empty_strings_in_messages() {
-    let msg = ClientMessage::Message {
-      username: "".to_string(),
-      content: "Message with empty username".to_string(),
-    };
-    let cache = MessageCache::new(10);
-
-    let encoded = encode_message_with_cache(&msg, &cache)
-      .await
-      .expect("Failed to encode message with empty username");
-    let decoded: ClientMessage = decode_message(&encoded[LENGTH_PREFIX..])
-      .expect("Failed to decode message with empty username");
-
-    if let ClientMessage::Message { username, content } = decoded {
-      assert_eq!(username, "");
-      assert_eq!(content, "Message with empty username");
-    }
-
-    let msg = ClientMessage::Message {
-      username: "user".to_string(),
-      content: "".to_string(),
-    };
-
-    let encoded = encode_message_with_cache(&msg, &cache)
-      .await
-      .expect("Failed to encode message with empty content");
-    let decoded: ClientMessage = decode_message(&encoded[LENGTH_PREFIX..])
-      .expect("Failed to decode message with empty content");
-
-    if let ClientMessage::Message { username, content } = decoded {
-      assert_eq!(username, "user");
-      assert_eq!(content, "");
-    }
-  }
-
-  #[tokio::test]
-  async fn test_long_strings_in_messages() {
-    let long_username = "a".repeat(1000);
-    let long_content = "b".repeat(10000);
-
-    let msg = ClientMessage::Message {
-      username: long_username.clone(),
-      content: long_content.clone(),
-    };
-    let cache = MessageCache::new(10);
-
-    let encoded = encode_message_with_cache(&msg, &cache)
-      .await
-      .expect("Failed to encode message with long strings");
-    let decoded: ClientMessage = decode_message(&encoded[LENGTH_PREFIX..])
-      .expect("Failed to decode message with long strings");
-
-    if let ClientMessage::Message { username, content } = decoded {
-      assert_eq!(username, long_username);
-      assert_eq!(content, long_content);
-    }
-  }
-
-  #[test]
-  fn test_decode_message_with_invalid_data() {
-    let result: Result<ClientMessage, _> = decode_message::<ClientMessage>(&[]);
-    assert!(result.is_err(), "Should fail to decode empty data");
-
-    let invalid_data = vec![
-      0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78,
-    ];
-    let result: Result<ClientMessage, _> = decode_message(&invalid_data);
-
-    assert!(
-      result.is_ok() || result.is_err(),
-      "Decoding should either succeed or fail gracefully"
-    );
-  }
-
-  #[tokio::test]
-  async fn test_encode_message_edge_cases() {
-    let small_msg = ClientMessage::Join {
-      username: "a".to_string(),
-    };
-    let cache = MessageCache::new(10);
-    let encoded = encode_message_with_cache(&small_msg, &cache)
-      .await
-      .expect("Failed to encode small message");
-    assert!(encoded.len() > LENGTH_PREFIX);
-
-    let large_msg = ClientMessage::Message {
-      username: "user".to_string(),
-      content: "x".repeat(100000),
-    };
-    let encoded = encode_message_with_cache(&large_msg, &cache)
-      .await
-      .expect("Failed to encode large message");
-    assert!(encoded.len() > 100000);
-
-    let decoded: ClientMessage =
-      decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode large message");
-    if let ClientMessage::Message { username, content } = decoded {
-      assert_eq!(username, "user");
-      assert_eq!(content.len(), 100000);
-    }
-  }
-
-  #[tokio::test]
-  async fn test_message_type_discrimination() {
-    let messages = [
-      ClientMessage::Join {
-        username: "user1".to_string(),
-      },
-      ClientMessage::Leave {
-        username: "user2".to_string(),
-      },
-      ClientMessage::Message {
-        username: "user3".to_string(),
-        content: "test".to_string(),
-      },
-    ];
-    let cache = MessageCache::new(10);
-
-    for (i, original_msg) in messages.iter().enumerate() {
-      let encoded = encode_message_with_cache(original_msg, &cache)
-        .await
-        .expect("Failed to encode message");
-      let decoded: ClientMessage =
-        decode_message(&encoded[LENGTH_PREFIX..]).expect("Failed to decode message");
-
-      match (original_msg, decoded) {
-        (
-          ClientMessage::Join {
-            username: orig_user,
-          },
-          ClientMessage::Join { username: dec_user },
-        ) => {
-          assert_eq!(
-            *orig_user, dec_user,
-            "Join message {} should have matching usernames",
-            i
-          );
+    for _ in 0..10 {
+      let counter = Arc::clone(&counter);
+      let handle = thread::spawn(move || {
+        let mut ids = vec![];
+        for _ in 0..100 {
+          ids.push(counter.next_id());
         }
-        (
-          ClientMessage::Leave {
-            username: orig_user,
-          },
-          ClientMessage::Leave { username: dec_user },
-        ) => {
-          assert_eq!(
-            *orig_user, dec_user,
-            "Leave message {} should have matching usernames",
-            i
-          );
-        }
-        (
-          ClientMessage::Message {
-            username: orig_user,
-            content: orig_content,
-          },
-          ClientMessage::Message {
-            username: dec_user,
-            content: dec_content,
-          },
-        ) => {
-          assert_eq!(
-            *orig_user, dec_user,
-            "Message {} should have matching usernames",
-            i
-          );
-          assert_eq!(
-            *orig_content, dec_content,
-            "Message {} should have matching content",
-            i
-          );
-        }
-        _ => panic!("Message {} type mismatch after encoding/decoding", i),
+        ids
+      });
+      handles.push(handle);
+    }
+
+    let mut all_ids = std::collections::HashSet::new();
+    for handle in handles {
+      let ids = handle.join().expect("Thread panicked");
+      for id in ids {
+        assert!(all_ids.insert(id), "Duplicate ID");
       }
     }
+
+    assert_eq!(all_ids.len(), 1000);
+    assert_eq!(counter.current_count(), 1000);
   }
 
-  #[tokio::test]
-  async fn test_length_prefix_constants() {
-    assert_eq!(LENGTH_PREFIX, 4, "Length prefix should be 4 bytes for u32");
+  #[test]
+  fn test_cache_with_user_counter() {
+    let cache = MessageCache::new(100);
+    let counter = UserMessageCounter::new("alice".to_string());
 
-    let msg = ClientMessage::Join {
-      username: "test".to_string(),
-    };
-    let cache = MessageCache::new(10);
-    let encoded = encode_message_with_cache(&msg, &cache)
-      .await
-      .expect("Failed to encode test message");
-
-    assert!(
-      encoded.len() > LENGTH_PREFIX,
-      "Encoded message should be longer than length prefix"
+    let msg1 = SharedServerMessage::new_with_counter(
+      ServerMessage::Message {
+        username: "alice".to_string(),
+        content: "hello".to_string(),
+      },
+      &counter,
     );
 
-    let length_bytes = &encoded[0..LENGTH_PREFIX];
-    let length = u32::from_be_bytes([
-      length_bytes[0],
-      length_bytes[1],
-      length_bytes[2],
-      length_bytes[3],
-    ]);
+    let msg2 = SharedServerMessage::new_with_counter(
+      ServerMessage::Message {
+        username: "alice".to_string(),
+        content: "world".to_string(),
+      },
+      &counter,
+    );
 
-    assert_eq!(length as usize, encoded.len() - LENGTH_PREFIX);
+    // Different messages = different IDs
+    encode_message_with_cache(&msg1, &cache).expect("Encoding failed");
+    encode_message_with_cache(&msg2, &cache).expect("Encoding failed");
+
+    assert_eq!(cache.len(), 2);
   }
 
   #[test]
-  fn test_client_message_factory_methods() {
-    let join_msg = ClientMessage::join("alice".to_string());
-    match join_msg {
-      ClientMessage::Join { username } => assert_eq!(username, "alice"),
-      _ => panic!("Expected Join message"),
-    }
+  fn test_system_messages() {
+    let msg1 = SharedServerMessage::new_system(ServerMessage::Success {
+      message: "OK".to_string(),
+    });
+    let msg2 = SharedServerMessage::new_system(ServerMessage::Success {
+      message: "Done".to_string(),
+    });
 
-    let leave_msg = ClientMessage::leave("bob".to_string());
-    match leave_msg {
-      ClientMessage::Leave { username } => assert_eq!(username, "bob"),
-      _ => panic!("Expected Leave message"),
-    }
-
-    let message_msg = ClientMessage::message("charlie".to_string(), "Hello".to_string());
-    match message_msg {
-      ClientMessage::Message { username, content } => {
-        assert_eq!(username, "charlie");
-        assert_eq!(content, "Hello");
-      }
-      _ => panic!("Expected Message message"),
-    }
-  }
-
-  #[test]
-  fn test_server_message_factory_methods() {
-    let success_msg = ServerMessage::success("Welcome!".to_string());
-    match success_msg {
-      ServerMessage::Success { message } => assert_eq!(message, "Welcome!"),
-      _ => panic!("Expected Success message"),
-    }
-
-    let error_msg = ServerMessage::error("Error occurred".to_string());
-    match error_msg {
-      ServerMessage::Error { reason } => assert_eq!(reason, "Error occurred"),
-      _ => panic!("Expected Error message"),
-    }
-
-    let message_msg = ServerMessage::message("alice".to_string(), "Hello".to_string());
-    match message_msg {
-      ServerMessage::Message { username, content } => {
-        assert_eq!(username, "alice");
-        assert_eq!(content, "Hello");
-      }
-      _ => panic!("Expected Message message"),
-    }
-
-    let taken_msg = ServerMessage::user_name_already_taken("takenuser".to_string());
-    match taken_msg {
-      ServerMessage::UserNameAlreadyTaken { username } => assert_eq!(username, "takenuser"),
-      _ => panic!("Expected UserNameAlreadyTaken message"),
-    }
-
-    let joined_msg = ServerMessage::user_joined("newuser".to_string());
-    match joined_msg {
-      ServerMessage::UserJoined { username } => assert_eq!(username, "newuser"),
-      _ => panic!("Expected UserJoined message"),
-    }
-
-    let left_msg = ServerMessage::user_left("leavinguser".to_string());
-    match left_msg {
-      ServerMessage::UserLeft { username } => assert_eq!(username, "leavinguser"),
-      _ => panic!("Expected UserLeft message"),
-    }
-  }
-
-  #[test]
-  fn test_shared_server_message_new() {
-    let message = ServerMessage::success("Test message".to_string());
-    let shared_message = SharedServerMessage::new(message);
-
-    if let Some(username) = shared_message.username() {
-      panic!("Success message should not have username: {}", username)
-    }
+    assert_ne!(msg1.cache_key(), msg2.cache_key());
   }
 }

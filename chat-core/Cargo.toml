@@ -12,3 +12,11 @@ thiserror = { workspace = true }
 bincode = { workspace = true}
 serde = { workspace = true }
 tracing = {workspace = true}
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+# Integration tests
+[[test]]
+name = "core_tests"
+path = "tests/core_tests.rs"

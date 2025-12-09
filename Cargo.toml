@@ -1,5 +1,5 @@
 [workspace]
-resolver = "3"
+resolver = "2"
 members = ["chat-client", "chat-core", "chat-server"]
 default-members = ["chat-client", "chat-core", "chat-server"]
 exclude = ["developer-tools"]
@@ -13,7 +13,7 @@ rust-version = "1.91.1"
 tokio = { version = "1", features = ["full"] }
 bincode = "2"
 uuid = { version = "1", features = ["v4"] }
-serde = { version = "1" }
+serde = { version = "1", features = ["derive"] }
 dashmap = "6"
 anyhow = "1"
 thiserror = "2"
@@ -21,7 +21,9 @@ tracing = "0.1"
 clap = "4"
 tracing-subscriber = "0.3"
 bytes = "1"
+crossbeam = "0.8"
+parking_lot = "0.12"
 
 # Testing and benchmarking
-criterion = "0.7"
+criterion = "0.5"
 tokio-test = "0.4"
