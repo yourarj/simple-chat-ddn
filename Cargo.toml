@@ -27,3 +27,9 @@ parking_lot = "0.12"
 # Testing and benchmarking
 criterion = "0.5"
 tokio-test = "0.4"
+
+# Release profile - Maximum performance
+[profile.release]
+lto = "fat"       # Full LTO across all crates
+panic = 'abort'   # Abort on panic (smaller, faster)
+codegen-units = 1 # Single unit for best optimization
