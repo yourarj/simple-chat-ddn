@@ -1,33 +1,49 @@
-use crate::{
-  error::ApplicationError,
-  protocol::{MAX_MESSAGE_SIZE, MAX_USERNAME_LENGTH},
-};
+// chat-core/src/utils.rs
 
-pub fn generate_unique_id() -> String {
-  let ts = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .expect("invalid time")
-    .as_nanos();
+use crate::error::{ApplicationError, Result};
 
-  format!("id_{}", ts)
-}
+pub const MIN_USERNAME_LENGTH: usize = 3; // Should be at least 3
+pub const MAX_USERNAME_LENGTH: usize = 30;
 
-pub fn validate_username(username: &str) -> Result<(), ApplicationError> {
-  if username.is_empty() || username.len() > MAX_USERNAME_LENGTH {
-    return Err(ApplicationError::UsernameNotFound);
-  }
+pub fn validate_username(username: &str) -> Result<()> {
+  let trimmed = username.trim();
 
-  if username.len() > 20 {
-    return Err(ApplicationError::message_too_large(
-      username.len(),
-      MAX_MESSAGE_SIZE,
+  if trimmed.is_empty() {
+    return Err(ApplicationError::invalid_username(
+      username.to_string(),
+      "Username cannot be empty".to_string(),
     ));
   }
-  Ok(())
-}
 
-pub fn is_valid_message(message: &str) -> bool {
-  !message.is_empty()
+  if trimmed.len() < MIN_USERNAME_LENGTH {
+    return Err(ApplicationError::invalid_username(
+      username.to_string(),
+      format!(
+        "Username must be at least {} characters long",
+        MIN_USERNAME_LENGTH
+      ),
+    ));
+  }
+
+  if trimmed.len() > MAX_USERNAME_LENGTH {
+    return Err(ApplicationError::invalid_username(
+      username.to_string(),
+      format!(
+        "Username must be at most {} characters long",
+        MAX_USERNAME_LENGTH
+      ),
+    ));
+  }
+
+  // Only allow alphanumeric and underscore
+  if !trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    return Err(ApplicationError::invalid_username(
+      username.to_string(),
+      "Username can only contain letters, numbers, and underscores".to_string(),
+    ));
+  }
+
+  Ok(())
 }
 
 #[cfg(test)]
@@ -35,53 +51,34 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_generate_unique_id() {
-    let id1 = generate_unique_id();
-    let id2 = generate_unique_id();
-
-    assert!(id1.starts_with("id_"));
-    assert!(id2.starts_with("id_"));
-    assert_ne!(id1, id2);
+  fn test_valid_username() {
+    assert!(validate_username("alice").is_ok());
+    assert!(validate_username("bob123").is_ok());
+    assert!(validate_username("user_name").is_ok());
   }
 
   #[test]
-  fn test_validate_username_valid() {
-    let valid_usernames = vec!["alice", "user123", "test_user", "a"];
-
-    for username in valid_usernames {
-      assert!(validate_username(username).is_ok());
-    }
+  fn test_invalid_username_too_short() {
+    assert!(validate_username("ab").is_err());
+    assert!(validate_username("a").is_err());
   }
 
   #[test]
-  fn test_validate_username_empty() {
-    let result = validate_username("");
-    assert!(result.is_err());
+  fn test_invalid_username_too_long() {
+    let long_name = "a".repeat(31);
+    assert!(validate_username(&long_name).is_err());
   }
 
   #[test]
-  fn test_validate_username_too_long() {
-    let long_username = "a".repeat(31);
-    let result = validate_username(&long_username);
-    assert!(result.is_err());
+  fn test_invalid_username_special_chars() {
+    assert!(validate_username("user@name").is_err());
+    assert!(validate_username("user name").is_err());
+    assert!(validate_username("user-name").is_err());
   }
 
   #[test]
-  fn test_validate_username_over_20_chars() {
-    let long_username = "a".repeat(21);
-    let result = validate_username(&long_username);
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_is_valid_message_valid() {
-    assert!(is_valid_message("Hello"));
-    assert!(is_valid_message("a"));
-    assert!(is_valid_message("This is a test message"));
-  }
-
-  #[test]
-  fn test_is_valid_message_empty() {
-    assert!(!is_valid_message(""));
+  fn test_invalid_username_empty() {
+    assert!(validate_username("").is_err());
+    assert!(validate_username("   ").is_err());
   }
 }
