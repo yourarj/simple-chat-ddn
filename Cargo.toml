@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["chat-client", "chat-core", "chat-server"]
-default-members = ["chat-client", "chat-core", "chat-server"]
+members = ["chat-client", "chat-core", "chat-server", "chat-loadtest"]
+default-members = ["chat-client", "chat-core", "chat-server", "chat-loadtest"]
 exclude = ["developer-tools"]
 
 [workspace.package]
